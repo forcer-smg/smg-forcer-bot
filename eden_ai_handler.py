@@ -32,7 +32,11 @@ class EdenAIHandler:
     def __init__(self):
         """Initialize Eden AI handler with API key"""
         self.api_key = os.getenv('EDEN_AI_API_KEY')
+        # Use V2 API (still supported until end of 2026)
+        # V3 API uses different structure: /v3/universal-ai
+        # See: https://docs.edenai.co/
         self.base_url = "https://api.edenai.run/v2"
+        self.api_version = "v2"  # Can be upgraded to "v3" later
         
         if not self.api_key:
             logger.warning("Eden AI API key not found. Set EDEN_AI_API_KEY environment variable.")
