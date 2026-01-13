@@ -4,6 +4,11 @@ Eden AI Integration Handler
 Provides current information fetching capabilities for DeepSeek
 Eden AI acts as a tool layer for fetching current/recent code, search results, and data
 DeepSeek remains the reasoning/agent layer
+
+API Documentation: https://docs.edenai.co/
+- Currently using V2 API (supported until end of 2026)
+- V3 API available at /v3/universal-ai with different structure
+- No Python SDK required - uses direct HTTP API calls
 """
 
 import os
