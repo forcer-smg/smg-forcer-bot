@@ -240,7 +240,9 @@ def ensure_mode_keyboard_at_bottom(user_id: int, context: ContextTypes.DEFAULT_T
                 return existing_keyboard
         
         # Append mode buttons as last row
-        combined_rows = existing_rows + [mode_buttons_row]
+        # Convert existing_rows to list if it's a tuple
+        existing_rows_list = list(existing_rows) if isinstance(existing_rows, tuple) else existing_rows
+        combined_rows = existing_rows_list + [mode_buttons_row]
         return InlineKeyboardMarkup(combined_rows)
     
     # No existing keyboard, return just mode keyboard
