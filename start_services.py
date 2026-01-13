@@ -83,6 +83,15 @@ def run_bot():
     """Run Telegram bot"""
     logger.info("Starting Telegram bot...")
     try:
+        # Verify required modules exist
+        import os
+        required_files = ['oxapay.py', 'dashboard.py', 'telegram_bot.py']
+        missing = [f for f in required_files if not os.path.exists(f)]
+        if missing:
+            logger.error(f"Missing required files: {missing}")
+            logger.error(f"Current directory: {os.getcwd()}")
+            logger.error(f"Files in directory: {os.listdir('.')[:20]}")
+        
         # Import and run bot directly (not as subprocess to avoid exit issues)
         import telegram_bot
         telegram_bot.main()
@@ -153,6 +162,12 @@ def run_dashboard():
             import traceback
             logger.error(traceback.format_exc())
             # Continue anyway - might work
+        
+        # Verify dashboard module exists
+        if not os.path.exists('dashboard.py'):
+            logger.error(f"dashboard.py not found in {os.getcwd()}")
+            logger.error(f"Files in directory: {os.listdir('.')[:30]}")
+            raise FileNotFoundError("dashboard.py not found")
         
         # Import and run dashboard directly (not as subprocess)
         import dashboard
