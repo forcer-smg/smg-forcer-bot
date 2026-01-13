@@ -131,7 +131,7 @@ def restore_database_schema():
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT,
                 date DATE,
-                requests_count INTEGER DEFAULT 0,
+                message_count INTEGER DEFAULT 0,
                 FOREIGN KEY (user_id) REFERENCES users(user_id),
                 UNIQUE(user_id, date)
             )
