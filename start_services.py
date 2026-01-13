@@ -3,6 +3,8 @@
 """
 Start both Telegram bot and Dashboard API services
 For Railway deployment
+
+Version: 2026-01-13 - Fixed module imports
 """
 
 import subprocess
