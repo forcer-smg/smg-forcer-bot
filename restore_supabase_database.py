@@ -85,7 +85,7 @@ def restore_database_schema():
             except Exception as e:
                 logger.debug(f"Column {column} check: {e}")
         
-        logger.info("      ✅ users table ready")
+        logger.info("      [OK] users table ready")
         
         # 2. Subscriptions table
         logger.info("[2/6] Creating subscriptions table...")
@@ -103,7 +103,7 @@ def restore_database_schema():
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
-        logger.info("      ✅ subscriptions table ready")
+        logger.info("      [OK] users table ready")
         
         # 3. Payments table
         logger.info("[3/6] Creating payments table...")
@@ -122,7 +122,7 @@ def restore_database_schema():
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
-        logger.info("      ✅ payments table ready")
+        logger.info("      [OK] payments table ready")
         
         # 4. Daily usage table
         logger.info("[4/6] Creating daily_usage table...")
@@ -136,7 +136,7 @@ def restore_database_schema():
                 UNIQUE(user_id, date)
             )
         """)
-        logger.info("      ✅ daily_usage table ready")
+        logger.info("      [OK] daily_usage table ready")
         
         # 5. Referral transactions table
         logger.info("[5/6] Creating referral_transactions table...")
@@ -151,7 +151,7 @@ def restore_database_schema():
                 FOREIGN KEY (referred_id) REFERENCES users(user_id)
             )
         """)
-        logger.info("      ✅ referral_transactions table ready")
+        logger.info("      [OK] referral_transactions table ready")
         
         # 6. Admins table
         logger.info("[6/6] Creating admins table...")
@@ -162,7 +162,7 @@ def restore_database_schema():
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
-        logger.info("      ✅ admins table ready")
+        logger.info("      [OK] admins table ready")
         
         # Create indexes for performance
         logger.info("")
@@ -182,9 +182,9 @@ def restore_database_schema():
                     CREATE INDEX IF NOT EXISTS {idx_name} 
                     ON {table}({column})
                 """)
-                logger.info(f"      ✅ {idx_name}")
+                logger.info(f"      [OK] {idx_name}")
             except Exception as e:
-                logger.warning(f"      ⚠️  {idx_name}: {e}")
+                logger.warning(f"      [WARN] {idx_name}: {e}")
         
         # Verify tables
         logger.info("")
@@ -206,16 +206,16 @@ def restore_database_schema():
         
         logger.info("")
         logger.info("=" * 60)
-        logger.info("✅ DATABASE SCHEMA RESTORED SUCCESSFULLY!")
+        logger.info("[SUCCESS] DATABASE SCHEMA RESTORED SUCCESSFULLY!")
         logger.info("=" * 60)
         logger.info("")
         logger.info("All required tables have been created/verified:")
-        logger.info("  ✅ users")
-        logger.info("  ✅ subscriptions")
-        logger.info("  ✅ payments")
-        logger.info("  ✅ daily_usage")
-        logger.info("  ✅ referral_transactions")
-        logger.info("  ✅ admins")
+        logger.info("  [OK] users")
+        logger.info("  [OK] subscriptions")
+        logger.info("  [OK] payments")
+        logger.info("  [OK] daily_usage")
+        logger.info("  [OK] referral_transactions")
+        logger.info("  [OK] admins")
         logger.info("")
         logger.info("Note: This script preserves existing data.")
         logger.info("It only creates tables/columns if they don't exist.")
@@ -224,7 +224,7 @@ def restore_database_schema():
         return True
         
     except Exception as e:
-        logger.error(f"❌ Error restoring database: {e}")
+        logger.error(f"[ERROR] Error restoring database: {e}")
         import traceback
         traceback.print_exc()
         cursor.close()
@@ -232,15 +232,22 @@ def restore_database_schema():
         return False
 
 if __name__ == "__main__":
+    import sys
+    import io
+    # Set UTF-8 encoding for Windows compatibility
+    if sys.platform == 'win32':
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    
     print("")
-    print("⚠️  WARNING: This will modify your Supabase database!")
+    print("WARNING: This will modify your Supabase database!")
     print("   It will create tables if they don't exist.")
     print("   Existing data will be preserved.")
     print("")
     response = input("Continue? (yes/no): ").strip().lower()
     
     if response != 'yes':
-        print("❌ Cancelled")
+        print("Cancelled")
         sys.exit(0)
     
     success = restore_database_schema()
