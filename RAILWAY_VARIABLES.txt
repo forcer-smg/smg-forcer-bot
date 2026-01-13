@@ -1,0 +1,66 @@
+============================================================
+RAILWAY ENVIRONMENT VARIABLES TO ADD
+============================================================
+
+Copy these EXACT variable names and values to Railway:
+
+⚠️  CRITICAL: DATABASE_URL (Required for using existing Supabase data)
+1. DATABASE_URL
+   Value: postgresql://postgres:[YOUR-PASSWORD]@db.yllsquazrwgbndgonxti.supabase.co:5432/postgres
+   How to get:
+   - Go to Supabase Dashboard → Settings → Database
+   - Find "Connection string" → "URI" tab
+   - Copy the connection string
+   - Replace [YOUR-PASSWORD] with your actual database password
+   IMPORTANT: Without this, the bot uses SQLite instead of your Supabase database!
+
+2. SUPABASE_URL (Optional - for API features)
+   Value: https://yllsquazrwgbndgonxti.supabase.co
+
+3. SUPABASE_KEY (Optional - for API features)
+   Value: [GET THIS FROM SUPABASE DASHBOARD]
+   Location: https://supabase.com/dashboard/project/yllsquazrwgbndgonxti/settings/api
+   Use: The "anon" or "public" key (NOT service_role)
+
+============================================================
+HOW TO ADD IN RAILWAY:
+============================================================
+
+1. Go to: https://railway.app/dashboard
+2. Select your service: smg-forcer-bot
+3. Click "Variables" tab
+4. Click "+ New Variable"
+5. Add each variable (in this order):
+   
+   FIRST - DATABASE_URL (Required!):
+   - Name: DATABASE_URL
+   - Value: postgresql://postgres:[YOUR-PASSWORD]@db.yllsquazrwgbndgonxti.supabase.co:5432/postgres
+   - Click "Add"
+   - ⚠️  Replace [YOUR-PASSWORD] with your actual Supabase database password!
+   
+   SECOND - SUPABASE_URL (Optional):
+   - Name: SUPABASE_URL
+   - Value: https://yllsquazrwgbndgonxti.supabase.co
+   - Click "Add"
+   
+   THIRD - SUPABASE_KEY (Optional):
+   - Name: SUPABASE_KEY
+   - Value: [paste your anon key here]
+   - Click "Add"
+
+6. Railway will auto-redeploy after adding variables
+
+============================================================
+VERIFICATION:
+============================================================
+
+After adding variables, check Railway logs for:
+- ✅ Using PostgreSQL database (from DATABASE_URL)
+- ✅ PostgreSQL database initialized successfully
+- ✅ Settings sync enabled (if SUPABASE_URL and SUPABASE_KEY are set)
+- ✅ Bot running without errors
+
+If you see "Using SQLite database" in the logs, DATABASE_URL is not set correctly!
+
+============================================================
+
