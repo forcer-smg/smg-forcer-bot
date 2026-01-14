@@ -4448,7 +4448,8 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get caption or use default
         caption = update.message.caption or "What is in this image? Describe it in detail."
         
-        # Process image with vision models
+        # Process image with vision models (optional - photo is already saved)
+        vision_processed = False
         try:
             # Try to use DesktopAIHandler, fallback to vision_processor
             try:
@@ -4469,9 +4470,19 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if result.get('success'):
                     response_text = result.get('result', 'Image processed successfully')
                     await update.message.reply_text(f"🖼️ **Image Analysis:**\n\n{response_text}", parse_mode='Markdown')
+                    vision_processed = True
                 else:
                     error = result.get('error', 'Unknown error')
-                    await update.message.reply_text(f"❌ **Error processing image:**\n{error}")
+                    # Don't fail completely - photo is saved for ID generation
+                    if 'No vision models' in error or 'all failed' in error.lower():
+                        await update.message.reply_text(
+                            f"📸 **Photo saved!**\n\n"
+                            f"⚠️ Vision analysis unavailable (no API keys configured).\n"
+                            f"✅ Photo is ready for ID generation.\n\n"
+                            f"Send your name, DOB, and address to generate your Texas ID."
+                        )
+                    else:
+                        await update.message.reply_text(f"⚠️ **Vision analysis failed:**\n{error}\n\n✅ Photo saved for ID generation.")
             else:
                 # Fallback: use vision processor directly
                 vision_proc = get_vision_processor()
@@ -4480,13 +4491,46 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if result.get('success'):
                     response_text = result.get('result', 'Image processed successfully')
                     await update.message.reply_text(f"🖼️ **Image Analysis:**\n\n{response_text}", parse_mode='Markdown')
+                    vision_processed = True
                 else:
                     error = result.get('error', 'Unknown error')
-                    await update.message.reply_text(f"❌ **Error processing image:**\n{error}")
+                    # Don't fail completely - photo is saved for ID generation
+                    if 'No vision models' in error or 'all failed' in error.lower():
+                        await update.message.reply_text(
+                            f"📸 **Photo saved!**\n\n"
+                            f"⚠️ Vision analysis unavailable (no API keys configured).\n"
+                            f"✅ Photo is ready for ID generation.\n\n"
+                            f"Send your name, DOB, and address to generate your Texas ID."
+                        )
+                    else:
+                        await update.message.reply_text(f"⚠️ **Vision analysis failed:**\n{error}\n\n✅ Photo saved for ID generation.")
         
         except Exception as e:
             logger.error(f"Image processing error: {e}", exc_info=True)
-            await update.message.reply_text(f"❌ Error processing image: {str(e)}")
+            # Don't fail completely - photo is saved
+            if 'No vision models' in str(e) or 'vision' in str(e).lower():
+                await update.message.reply_text(
+                    f"📸 **Photo saved!**\n\n"
+                    f"⚠️ Vision analysis unavailable.\n"
+                    f"✅ Photo is ready for ID generation.\n\n"
+                    f"Send your name, DOB, and address to generate your Texas ID."
+                )
+            else:
+                await update.message.reply_text(
+                    f"📸 **Photo saved!**\n\n"
+                    f"⚠️ Vision analysis error: {str(e)}\n"
+                    f"✅ Photo is ready for ID generation."
+                )
+        
+        # If vision processing didn't happen, confirm photo is saved
+        if not vision_processed:
+            await update.message.reply_text(
+                f"✅ **Photo received and saved!**\n\n"
+                f"Ready for ID generation. Send your details:\n"
+                f"• Name: [Your Name]\n"
+                f"• DOB: [MM/DD/YYYY]\n"
+                f"• Address: [Your Address]"
+            )
         finally:
             # Clean up temp file
             try:
