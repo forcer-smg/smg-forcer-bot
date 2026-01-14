@@ -4531,17 +4531,16 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• DOB: [MM/DD/YYYY]\n"
                 f"• Address: [Your Address]"
             )
-        finally:
-            # Clean up temp file
-            try:
-                if os.path.exists(image_path):
-                    os.remove(image_path)
-            except:
-                pass
-    
     except Exception as e:
         logger.error(f"Error handling image: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Error: {str(e)}")
+    finally:
+        # Clean up temp file
+        try:
+            if 'image_path' in locals() and os.path.exists(image_path):
+                os.remove(image_path)
+        except:
+            pass
 
 
 async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
