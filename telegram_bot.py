@@ -4888,6 +4888,8 @@ You've used all your available requests.
         except ImportError as e:
             logger.warning(f"Desktop AI handler not available: {e}, using basic streaming")
             # Fallback to basic streaming
+            # Ensure time module is accessible (re-import to avoid shadowing issues)
+            import time as time_module
             typing_task = asyncio.create_task(
                 send_typing_continuously(context, update.effective_chat.id)
             )
@@ -4905,7 +4907,7 @@ You've used all your available requests.
                     full_response += chunk
                     chunk_buffer += chunk
                     
-                    current_time = time.time()
+                    current_time = time_module.time()
                     should_update = (
                         current_time - last_update_time >= update_interval or
                         len(chunk_buffer) >= buffer_size
