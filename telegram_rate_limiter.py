@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-Telegram Rate Limiter - Handle Telegram API rate limits and timeouts gracefully
-Prevents API timeouts and rate limit errors during long-running tasks
+Telegram Rate Limiter - Per-chat leaky bucket with Retry-After support
+Implements proper rate limiting per Telegram's guidelines:
+- Max 1 message per second per chat
+- Max 20-30 per minute per chat (groups)
+- Respect Retry-After header from 429 responses
+- Use jitter to prevent thundering herd
 """
 
 import time
 import asyncio
 import logging
+import random
 from typing import Optional, Dict, Any
 from collections import deque
 from datetime import datetime, timedelta
@@ -14,42 +19,44 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 
-class TelegramRateLimiter:
-    """Handle Telegram API rate limits and timeouts"""
+class ChatRateLimiter:
+    """Per-chat rate limiter with leaky bucket algorithm"""
     
-    def __init__(self, max_messages_per_second: int = 25, max_messages_per_minute: int = 20):
+    def __init__(self, chat_id: int, is_group: bool = False):
         """
-        Initialize rate limiter
+        Initialize per-chat rate limiter
         
         Args:
-            max_messages_per_second: Maximum messages per second (Telegram limit is 30, we use 25 for safety)
-            max_messages_per_minute: Maximum messages per minute (for burst protection)
+            chat_id: Telegram chat ID
+            is_group: True if this is a group chat (stricter limits)
         """
-        self.max_mps = max_messages_per_second
-        self.max_mpm = max_messages_per_minute
+        self.chat_id = chat_id
+        self.is_group = is_group
         
-        # Track message timestamps
-        self.message_timestamps = deque(maxlen=1000)  # Keep last 1000 timestamps
-        self.minute_timestamps = deque(maxlen=100)  # Keep last 100 timestamps for minute window
+        # Leaky bucket: track message timestamps
+        # Max 1 msg/sec, max 20-30/min (30 for groups, 20 for private)
+        self.max_per_second = 1
+        self.max_per_minute = 30 if is_group else 20
         
-        # Track failures for exponential backoff
-        self.consecutive_failures = 0
-        self.last_failure_time = None
-        self.backoff_until = None
+        # Message timestamps (leaky bucket)
+        self.message_timestamps = deque(maxlen=self.max_per_minute)
         
-        logger.info(f"Telegram Rate Limiter initialized: {max_messages_per_second} msg/s, {max_messages_per_minute} msg/min")
+        # Cooldown until when this chat is paused (from Retry-After)
+        self.cooldown_until = None
+        
+        logger.debug(f"ChatRateLimiter initialized for chat {chat_id} (group: {is_group})")
     
-    def can_send_message(self) -> bool:
+    def can_send(self) -> bool:
         """
-        Check if we can send a message without hitting rate limit
+        Check if we can send a message to this chat
         
         Returns:
-            True if we can send, False if we should wait
+            True if allowed, False if should wait
         """
         now = time.time()
         
-        # Check if we're in backoff period
-        if self.backoff_until and now < self.backoff_until:
+        # Check if chat is in cooldown (from Retry-After)
+        if self.cooldown_until and now < self.cooldown_until:
             return False
         
         # Remove old timestamps (older than 1 second)
@@ -57,218 +64,226 @@ class TelegramRateLimiter:
         while self.message_timestamps and self.message_timestamps[0] < cutoff:
             self.message_timestamps.popleft()
         
-        # Check messages per second
-        if len(self.message_timestamps) >= self.max_mps:
-            logger.debug(f"Rate limit: {len(self.message_timestamps)} messages in last second (max: {self.max_mps})")
+        # Check per-second limit
+        recent_count = len([ts for ts in self.message_timestamps if ts > cutoff])
+        if recent_count >= self.max_per_second:
             return False
         
         # Remove old timestamps (older than 1 minute)
         minute_cutoff = now - 60.0
-        while self.minute_timestamps and self.minute_timestamps[0] < minute_cutoff:
-            self.minute_timestamps.popleft()
+        while self.message_timestamps and self.message_timestamps[0] < minute_cutoff:
+            self.message_timestamps.popleft()
         
-        # Check messages per minute
-        if len(self.minute_timestamps) >= self.max_mpm:
-            logger.debug(f"Rate limit: {len(self.minute_timestamps)} messages in last minute (max: {self.max_mpm})")
+        # Check per-minute limit
+        minute_count = len(self.message_timestamps)
+        if minute_count >= self.max_per_minute:
             return False
         
         return True
     
-    async def wait_if_needed(self) -> float:
+    def record_sent(self):
+        """Record that a message was sent to this chat"""
+        now = time.time()
+        self.message_timestamps.append(now)
+    
+    def pause_for(self, seconds: float, jitter: bool = True):
         """
-        Wait if rate limit would be hit, return wait time
+        Pause this chat for a period (e.g., from Retry-After)
+        
+        Args:
+            seconds: Seconds to wait
+            jitter: Add random jitter (0.7-1.3x multiplier)
+        """
+        if jitter:
+            # Add jitter: random(0.7-1.3) to prevent thundering herd
+            jitter_multiplier = random.uniform(0.7, 1.3)
+            seconds = seconds * jitter_multiplier
+        
+        self.cooldown_until = time.time() + seconds
+        logger.info(f"Chat {self.chat_id} paused for {seconds:.2f}s (cooldown until {self.cooldown_until:.2f})")
+    
+    def get_wait_time(self) -> float:
+        """
+        Get how long to wait before next message can be sent
+        
+        Returns:
+            Wait time in seconds (0 if can send now)
+        """
+        now = time.time()
+        
+        # Check cooldown
+        if self.cooldown_until and now < self.cooldown_until:
+            return self.cooldown_until - now
+        
+        # Check per-second limit
+        if self.message_timestamps:
+            oldest_recent = min([ts for ts in self.message_timestamps if ts > now - 1.0], default=None)
+            if oldest_recent:
+                wait = 1.0 - (now - oldest_recent)
+                if wait > 0:
+                    return wait
+        
+        # Check per-minute limit
+        if len(self.message_timestamps) >= self.max_per_minute:
+            oldest = self.message_timestamps[0]
+            wait = 60.0 - (now - oldest)
+            if wait > 0:
+                return wait
+        
+        return 0.0
+
+
+class TelegramRateLimiter:
+    """Global rate limiter with per-chat tracking"""
+    
+    def __init__(self):
+        """Initialize global rate limiter"""
+        # Per-chat rate limiters
+        self.chat_limiters: Dict[int, ChatRateLimiter] = {}
+        
+        # Global backoff (for global rate limits)
+        self.global_backoff_until = None
+        
+        logger.info("Telegram Rate Limiter initialized with per-chat leaky bucket")
+    
+    def get_chat_limiter(self, chat_id: int, is_group: bool = False) -> ChatRateLimiter:
+        """
+        Get or create rate limiter for a chat
+        
+        Args:
+            chat_id: Telegram chat ID
+            is_group: True if group chat
+        
+        Returns:
+            ChatRateLimiter instance
+        """
+        if chat_id not in self.chat_limiters:
+            self.chat_limiters[chat_id] = ChatRateLimiter(chat_id, is_group)
+        return self.chat_limiters[chat_id]
+    
+    def can_send_message(self, chat_id: Optional[int] = None) -> bool:
+        """
+        Check if we can send a message
+        
+        Args:
+            chat_id: Optional chat ID for per-chat checking
+        
+        Returns:
+            True if can send, False if should wait
+        """
+        # Check global backoff
+        if self.global_backoff_until and time.time() < self.global_backoff_until:
+            return False
+        
+        # Check per-chat if chat_id provided
+        if chat_id:
+            limiter = self.get_chat_limiter(chat_id)
+            return limiter.can_send()
+        
+        return True
+    
+    async def wait_if_needed(self, chat_id: Optional[int] = None) -> float:
+        """
+        Wait if rate limit would be hit
+        
+        Args:
+            chat_id: Optional chat ID for per-chat waiting
         
         Returns:
             Time waited in seconds
         """
-        if self.can_send_message():
-            return 0.0
-        
-        # Calculate wait time
+        # Check global backoff
         now = time.time()
-        
-        # Wait until we can send
-        wait_time = 0.0
-        
-        # Check backoff period
-        if self.backoff_until and now < self.backoff_until:
-            wait_time = self.backoff_until - now
-            logger.info(f"Waiting for backoff period: {wait_time:.2f}s")
+        if self.global_backoff_until and now < self.global_backoff_until:
+            wait_time = self.global_backoff_until - now
+            logger.info(f"Waiting for global backoff: {wait_time:.2f}s")
             await asyncio.sleep(wait_time)
             return wait_time
         
-        # Wait for messages per second limit
-        if self.message_timestamps:
-            oldest = self.message_timestamps[0]
-            time_since_oldest = now - oldest
-            if time_since_oldest < 1.0:
-                wait_time = 1.0 - time_since_oldest
-                logger.debug(f"Waiting for rate limit: {wait_time:.2f}s")
+        # Check per-chat if chat_id provided
+        if chat_id:
+            limiter = self.get_chat_limiter(chat_id)
+            wait_time = limiter.get_wait_time()
+            if wait_time > 0:
+                logger.debug(f"Waiting for chat {chat_id} rate limit: {wait_time:.2f}s")
                 await asyncio.sleep(wait_time)
                 return wait_time
         
-        # Wait for messages per minute limit
-        if self.minute_timestamps:
-            oldest = self.minute_timestamps[0]
-            time_since_oldest = now - oldest
-            if time_since_oldest < 60.0:
-                wait_time = 60.0 - time_since_oldest
-                logger.debug(f"Waiting for minute rate limit: {wait_time:.2f}s")
-                await asyncio.sleep(wait_time)
-                return wait_time
-        
-        return wait_time
+        return 0.0
     
-    def record_message_sent(self):
-        """Record that a message was sent"""
-        now = time.time()
-        self.message_timestamps.append(now)
-        self.minute_timestamps.append(now)
+    def record_message_sent(self, chat_id: Optional[int] = None):
+        """
+        Record that a message was sent
         
-        # Reset failure count on successful send
-        if self.consecutive_failures > 0:
-            self.consecutive_failures = 0
-            self.backoff_until = None
+        Args:
+            chat_id: Optional chat ID for per-chat tracking
+        """
+        if chat_id:
+            limiter = self.get_chat_limiter(chat_id)
+            limiter.record_sent()
     
-    def handle_timeout(self, error: Exception) -> Dict[str, Any]:
+    def handle_rate_limit(self, retry_after: Optional[int] = None, chat_id: Optional[int] = None):
+        """
+        Handle Telegram API rate limit error (429)
+        
+        Args:
+            retry_after: Seconds to wait from Retry-After header
+            chat_id: Optional chat ID for per-chat cooldown
+        """
+        if retry_after:
+            # Use Telegram's Retry-After value
+            wait_time = retry_after
+            
+            # Add jitter: random(0.7-1.3) to prevent thundering herd
+            jitter_multiplier = random.uniform(0.7, 1.3)
+            wait_time = wait_time * jitter_multiplier
+            
+            logger.warning(f"Rate limit hit - Retry-After: {retry_after}s, waiting {wait_time:.2f}s (with jitter)")
+            
+            if chat_id:
+                # Pause this specific chat
+                limiter = self.get_chat_limiter(chat_id)
+                limiter.pause_for(wait_time, jitter=False)  # Already applied jitter
+            else:
+                # Global backoff
+                self.global_backoff_until = time.time() + wait_time
+        else:
+            # No Retry-After - use exponential backoff
+            wait_time = 5.0  # Default 5 seconds
+            logger.warning(f"Rate limit hit (no Retry-After) - waiting {wait_time}s")
+            
+            if chat_id:
+                limiter = self.get_chat_limiter(chat_id)
+                limiter.pause_for(wait_time)
+            else:
+                self.global_backoff_until = time.time() + wait_time
+    
+    def handle_timeout(self, error: Exception, chat_id: Optional[int] = None):
         """
         Handle Telegram API timeout
         
         Args:
             error: The timeout error
-        
-        Returns:
-            Dictionary with retry information
+            chat_id: Optional chat ID
         """
-        self.consecutive_failures += 1
-        self.last_failure_time = time.time()
+        # Use exponential backoff for timeouts
+        wait_time = 2.0  # Start with 2 seconds
         
-        # Exponential backoff: 1s, 2s, 4s, 8s, max 30s
-        backoff_time = min(2 ** (self.consecutive_failures - 1), 30)
-        self.backoff_until = time.time() + backoff_time
+        logger.warning(f"Telegram API timeout - waiting {wait_time}s")
         
-        logger.warning(f"Telegram API timeout (failure #{self.consecutive_failures}), backing off for {backoff_time}s")
-        
-        return {
-            'should_retry': True,
-            'backoff_time': backoff_time,
-            'retry_after': self.backoff_until
-        }
-    
-    def handle_rate_limit(self, retry_after: int = None) -> Dict[str, Any]:
-        """
-        Handle Telegram API rate limit error
-        
-        Args:
-            retry_after: Seconds to wait before retry (from API response)
-        
-        Returns:
-            Dictionary with retry information
-        """
-        self.consecutive_failures += 1
-        self.last_failure_time = time.time()
-        
-        # Use API's retry_after if provided, otherwise use exponential backoff
-        if retry_after:
-            backoff_time = retry_after
+        if chat_id:
+            limiter = self.get_chat_limiter(chat_id)
+            limiter.pause_for(wait_time)
         else:
-            backoff_time = min(2 ** (self.consecutive_failures - 1), 30)
-        
-        self.backoff_until = time.time() + backoff_time
-        
-        logger.warning(f"Telegram API rate limit (failure #{self.consecutive_failures}), waiting {backoff_time}s")
-        
-        return {
-            'should_retry': True,
-            'backoff_time': backoff_time,
-            'retry_after': self.backoff_until
-        }
-    
-    async def send_with_retry(self, 
-                              send_func, 
-                              max_retries: int = 3,
-                              *args, 
-                              **kwargs) -> Any:
-        """
-        Send message with automatic retry on timeout/rate limit
-        
-        Args:
-            send_func: Async function to send message (e.g., update.message.reply_text)
-            max_retries: Maximum retry attempts
-            *args, **kwargs: Arguments to pass to send_func
-        
-        Returns:
-            Result from send_func
-        """
-        for attempt in range(max_retries):
-            try:
-                # Wait if needed
-                await self.wait_if_needed()
-                
-                # Try to send
-                result = await send_func(*args, **kwargs)
-                
-                # Record successful send
-                self.record_message_sent()
-                
-                return result
-                
-            except Exception as e:
-                error_str = str(e).lower()
-                
-                # Check if it's a timeout
-                if 'timeout' in error_str or 'timed out' in error_str:
-                    retry_info = self.handle_timeout(e)
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(retry_info['backoff_time'])
-                        continue
-                    else:
-                        logger.error(f"Max retries reached for timeout: {e}")
-                        raise
-                
-                # Check if it's a rate limit
-                elif 'rate limit' in error_str or 'too many requests' in error_str or '429' in error_str:
-                    # Try to extract retry_after from error
-                    retry_after = None
-                    if 'retry_after' in error_str:
-                        try:
-                            # Extract number after "retry_after"
-                            import re
-                            match = re.search(r'retry_after[:\s]+(\d+)', error_str)
-                            if match:
-                                retry_after = int(match.group(1))
-                        except:
-                            pass
-                    
-                    retry_info = self.handle_rate_limit(retry_after)
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(retry_info['backoff_time'])
-                        continue
-                    else:
-                        logger.error(f"Max retries reached for rate limit: {e}")
-                        raise
-                
-                # Other errors - retry with exponential backoff
-                else:
-                    if attempt < max_retries - 1:
-                        backoff = min(2 ** attempt, 10)  # 1s, 2s, 4s, max 10s
-                        logger.warning(f"Error sending message (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {backoff}s...")
-                        await asyncio.sleep(backoff)
-                        continue
-                    else:
-                        logger.error(f"Max retries reached: {e}")
-                        raise
-        
-        # Should never reach here, but just in case
-        raise Exception("Failed to send message after all retries")
+            self.global_backoff_until = time.time() + wait_time
 
 
 # Global instance
 _telegram_rate_limiter_instance = None
 
-def get_telegram_rate_limiter(max_mps: int = 25, max_mpm: int = 20) -> TelegramRateLimiter:
+def get_telegram_rate_limiter() -> TelegramRateLimiter:
     """Get or create global Telegram rate limiter instance"""
     global _telegram_rate_limiter_instance
     if _telegram_rate_limiter_instance is None:
-        _telegram_rate_limiter_instance = TelegramRateLimiter(max_mps, max_mpm)
+        _telegram_rate_limiter_instance = TelegramRateLimiter()
     return _telegram_rate_limiter_instance

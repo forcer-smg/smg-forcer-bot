@@ -345,10 +345,11 @@ async def safe_reply_text(update: Update, text: str, parse_mode: str = 'Markdown
 # Message edit rate limiting and failure tracking (replaces old _message_content_cache)
 # These are defined at module level after the lock initialization
 
-async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', max_retries: int = 0, min_edit_interval: float = 30.0, **kwargs):
+async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', max_retries: int = 0, **kwargs):
     """
-    Safely edit a message with Markdown, falling back to plain text if parsing fails.
-    Includes content caching, length checks, rate limiting, and retry logic with backoff.
+    Safely edit a message with per-chat rate limiting and Retry-After support.
+    Uses leaky bucket algorithm: max 1 msg/sec, max 20-30/min per chat.
+    Respects Telegram's Retry-After header from 429 responses.
     
     CRITICAL: Stops editing immediately on 400 Bad Request errors (permanent errors).
     
@@ -357,7 +358,6 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
         text: Text to send
         parse_mode: Parse mode (default: 'Markdown')
         max_retries: Maximum retry attempts (default: 0, no retries)
-        min_edit_interval: Minimum seconds between edits for same message (default: 30.0, increased significantly)
         **kwargs: Additional arguments for edit_message_text
     """
     # Get rate limiter
@@ -367,15 +367,19 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
     except ImportError:
         rate_limiter = None
     
-    # Get message ID for caching
+    # Get message ID and chat ID for caching and rate limiting
     message_id = None
     chat_id = None
+    is_group = False
+    
     if hasattr(query, 'message') and query.message:
         message_id = f"{query.message.chat.id}_{query.message.message_id}"
         chat_id = query.message.chat.id
+        is_group = query.message.chat.type in ['group', 'supergroup', 'channel']
     elif hasattr(query, 'effective_message') and query.effective_message:
         message_id = f"{query.effective_message.chat.id}_{query.effective_message.message_id}"
         chat_id = query.effective_message.chat.id
+        is_group = query.effective_message.chat.type in ['group', 'supergroup', 'channel']
     
     # Early exit if no message ID
     if not message_id:
@@ -401,12 +405,11 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
             logger.debug(f"Edit already in progress for {message_id}, skipping")
             return
         
-        # Rate limiting: Check if we've edited this message too recently
-        if message_id in _message_edit_times:
-            time_since_last_edit = time.time() - _message_edit_times[message_id]
-            if time_since_last_edit < min_edit_interval:
-                # Too soon to edit - skip this edit
-                logger.debug(f"Too soon to edit {message_id} ({time_since_last_edit:.1f}s < {min_edit_interval}s)")
+        # Per-chat rate limiting: Check if this chat can send
+        if rate_limiter and chat_id:
+            if not rate_limiter.can_send_message(chat_id):
+                # Rate limit hit for this chat - skip edit
+                logger.debug(f"Skipping edit for chat {chat_id} due to rate limit")
                 return
         
         # Mark as in progress
@@ -417,24 +420,16 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
             # Truncate and add indicator
             text = text[:4000] + "\n\n... (message truncated)"
         
-        # Check rate limiter before attempting edit
-        if rate_limiter:
-            if not rate_limiter.can_send_message():
-                # Rate limit hit - skip edit
-                logger.debug(f"Skipping edit due to rate limit")
-                _edit_in_progress[message_id] = False
-                return
-        
-        # Wait if rate limiter says we need to
-        if rate_limiter:
-            await rate_limiter.wait_if_needed()
+        # Wait if rate limiter says we need to (per-chat)
+        if rate_limiter and chat_id:
+            await rate_limiter.wait_if_needed(chat_id)
         
         try:
             await query.edit_message_text(text, parse_mode=parse_mode, **kwargs)
             
-            # Record successful send in rate limiter
-            if rate_limiter:
-                rate_limiter.record_message_sent()
+            # Record successful send in rate limiter (per-chat)
+            if rate_limiter and chat_id:
+                rate_limiter.record_message_sent(chat_id)
             
             # Cache successful edit
             _message_edit_cache[message_id] = text
@@ -454,18 +449,28 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
                 _edit_in_progress[message_id] = False
                 return  # DO NOT RETRY, DO NOT SEND NEW MESSAGE
             
-            # Handle 429 rate limit errors
+            # Handle 429 rate limit errors - Extract Retry-After from HTTP response
             if '429' in error_str or 'too many requests' in error_str or 'rate limit' in error_str:
                 logger.warning(f"Rate limit hit on edit_message_text for {message_id}")
-                if rate_limiter:
-                    # Extract retry_after if available
-                    retry_after = None
-                    if 'retry_after' in error_str:
+                
+                # Try to extract Retry-After from error object
+                retry_after = None
+                try:
+                    # Check if error has retry_after attribute (from httpx response)
+                    if hasattr(e, 'retry_after'):
+                        retry_after = e.retry_after
+                    # Check if error message contains retry_after
+                    elif 'retry_after' in error_str:
                         import re
                         match = re.search(r'retry_after[:\s]+(\d+)', error_str)
                         if match:
                             retry_after = int(match.group(1))
-                    rate_limiter.handle_rate_limit(retry_after)
+                except Exception as parse_error:
+                    logger.debug(f"Could not parse retry_after: {parse_error}")
+                
+                # Handle rate limit with Retry-After (per-chat)
+                if rate_limiter and chat_id:
+                    rate_limiter.handle_rate_limit(retry_after=retry_after, chat_id=chat_id)
                 
                 # Mark as failed and stop trying
                 _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
@@ -485,15 +490,6 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
                 _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
                 _edit_in_progress[message_id] = False
             return  # DO NOT RETRY, DO NOT FALLBACK
-                logger.warning(f"Failed to send message after edit failure: {send_error}")
-            return
-        except Exception as e:
-            last_error = e
-            if attempt < max_retries - 1:
-                wait_time = (2 ** attempt) * 0.1
-                await asyncio.sleep(wait_time)
-            else:
-                logger.error(f"Error editing message after {max_retries} attempts: {e}")
     
     # If all retries failed, log but don't raise
     if last_error:
