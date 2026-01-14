@@ -1139,7 +1139,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
                             for i, chunk in enumerate(chunks):
                                 if i == 0:
-                                    await query.edit_message_text(chunk[:4000], parse_mode='Markdown')
+                                    await safe_edit_message_text(query, chunk[:4000], parse_mode='Markdown')
                                 else:
                                     await query.message.reply_text(chunk[:4000], parse_mode='Markdown')
                             return
@@ -1177,11 +1177,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         for i, chunk in enumerate(chunks):
                             chunk_keyboard = keyboard if i == len(chunks) - 1 else None
                             if i == 0:
-                                await query.edit_message_text(chunk[:4000], parse_mode='Markdown', reply_markup=chunk_keyboard)
+                                await safe_edit_message_text(query, chunk[:4000], parse_mode='Markdown', reply_markup=chunk_keyboard)
                             else:
                                 await query.message.reply_text(chunk[:4000], parse_mode='Markdown', reply_markup=chunk_keyboard)
                     else:
-                        await query.edit_message_text(text[:4000], parse_mode='Markdown', reply_markup=keyboard)
+                        await safe_edit_message_text(query, text[:4000], parse_mode='Markdown', reply_markup=keyboard)
                 except Exception as e:
                     logger.error(f"Error handling scan result callback: {e}", exc_info=True)
                     await query.answer(f"Error: {str(e)[:50]}", show_alert=True)
