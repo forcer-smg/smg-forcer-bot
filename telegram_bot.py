@@ -5242,155 +5242,155 @@ If you believe this is an error, please contact support.
             if has_id_keyword or (has_name and (has_dob or has_address)):
                 try:
                     # Extract user data from message OR use saved state
-                user_data = {}
-                
-                # First, try to get saved user data from state
-                saved_data = context.user_data.get('saved_user_data', {})
-                if not saved_data:
-                    try:
-                        from user_state_manager import get_user_state_manager
-                        state_mgr = get_user_state_manager(db)
-                        user_data_state = state_mgr.get_state(user_id, 'user_data')
-                        if user_data_state:
-                            saved_data = user_data_state.get('value', {})
-                    except Exception as e:
-                        logger.warning(f"Could not load saved user data: {e}")
-                
-                if saved_data:
-                    user_data.update(saved_data)
-                    logger.info(f"Using saved user data: {user_data}")
-                
-                # Then, extract/override from current message
-                # Extract name - more flexible patterns
-                name_match = re.search(r'(?:name[:\s]+)?([A-Z][A-Z\s]{2,})', user_message)
-                if not name_match:
-                    # Try to find name at start of message (all caps or title case)
-                    name_match = re.search(r'^([A-Z][A-Z\s]+)', user_message)
-                if name_match:
-                    name = name_match.group(1).strip().upper()
-                    # Remove "NAME" keyword if present
-                    name = re.sub(r'^NAME\s+', '', name, flags=re.I)
-                    user_data['name'] = name
-                
-                # Extract DOB
-                dob_match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', user_message)
-                if dob_match:
-                    month, day, year = dob_match.groups()
-                    if len(year) == 2:
-                        year = '20' + year if int(year) < 50 else '19' + year
-                    user_data['dob'] = f"{month}/{day}/{year}"
-                
-                # Extract address - more flexible pattern
-                address_match = re.search(r'(\d+\s+[A-Za-z\s]+(?:rd|st|ave|road|street|blvd|boulevard|drive|dr|ln|lane|ct|court|way|pl|place)[^,\n]*)', user_message, re.I)
-                if address_match:
-                    full_address = address_match.group(1).strip()
-                    # Try to extract city, state, zip if present
-                    city_state_zip = re.search(r',\s*([A-Za-z]+),?\s*([A-Z]{2})?\s*(\d{5})?', user_message[address_match.end():], re.I)
-                    if city_state_zip:
-                        city = city_state_zip.group(1).strip() if city_state_zip.group(1) else ""
-                        state = city_state_zip.group(2).strip() if city_state_zip.group(2) else ""
-                        zip_code = city_state_zip.group(3).strip() if city_state_zip.group(3) else ""
-                        user_data['address'] = full_address
-                        if city:
-                            user_data['city'] = city
-                        if state:
-                            user_data['state'] = state
-                        if zip_code:
-                            user_data['zip'] = zip_code
-                    else:
-                        user_data['address'] = full_address
-                else:
-                    # Fallback: try to find address pattern without street type
-                    address_match = re.search(r'(\d+\s+[A-Za-z\s]+)(?:,\s*([A-Za-z]+))?(?:,\s*([A-Z]{2}))?(?:\s+(\d{5}))?', user_message, re.I)
+                    user_data = {}
+                    
+                    # First, try to get saved user data from state
+                    saved_data = context.user_data.get('saved_user_data', {})
+                    if not saved_data:
+                        try:
+                            from user_state_manager import get_user_state_manager
+                            state_mgr = get_user_state_manager(db)
+                            user_data_state = state_mgr.get_state(user_id, 'user_data')
+                            if user_data_state:
+                                saved_data = user_data_state.get('value', {})
+                        except Exception as e:
+                            logger.warning(f"Could not load saved user data: {e}")
+                    
+                    if saved_data:
+                        user_data.update(saved_data)
+                        logger.info(f"Using saved user data: {user_data}")
+                    
+                    # Then, extract/override from current message
+                    # Extract name - more flexible patterns
+                    name_match = re.search(r'(?:name[:\s]+)?([A-Z][A-Z\s]{2,})', user_message)
+                    if not name_match:
+                        # Try to find name at start of message (all caps or title case)
+                        name_match = re.search(r'^([A-Z][A-Z\s]+)', user_message)
+                    if name_match:
+                        name = name_match.group(1).strip().upper()
+                        # Remove "NAME" keyword if present
+                        name = re.sub(r'^NAME\s+', '', name, flags=re.I)
+                        user_data['name'] = name
+                    
+                    # Extract DOB
+                    dob_match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', user_message)
+                    if dob_match:
+                        month, day, year = dob_match.groups()
+                        if len(year) == 2:
+                            year = '20' + year if int(year) < 50 else '19' + year
+                        user_data['dob'] = f"{month}/{day}/{year}"
+                    
+                    # Extract address - more flexible pattern
+                    address_match = re.search(r'(\d+\s+[A-Za-z\s]+(?:rd|st|ave|road|street|blvd|boulevard|drive|dr|ln|lane|ct|court|way|pl|place)[^,\n]*)', user_message, re.I)
                     if address_match:
-                        street = address_match.group(1).strip()
-                        city = address_match.group(2).strip() if address_match.group(2) else ""
-                        state = address_match.group(3).strip() if address_match.group(3) else ""
-                        zip_code = address_match.group(4).strip() if address_match.group(4) else ""
-                        user_data['address'] = street
-                        if city:
-                            user_data['city'] = city
-                        if state:
-                            user_data['state'] = state
-                        if zip_code:
-                            user_data['zip'] = zip_code
-                
-                # Check database for Texas template
-                from template_manager import get_template_manager
-                tm = get_template_manager(db)
-                
-                # Search for Texas ID template
-                template = None
-                all_templates = tm.list_templates()
-                for t in all_templates:
-                    if isinstance(t, dict):
-                        name = t.get('name', '').lower()
-                        if 'texas' in name or ('id' in name and 'texas' in message_lower):
-                            template = t
-                            break
-                
-                # If no template found, try to get any ID template
-                if not template:
+                        full_address = address_match.group(1).strip()
+                        # Try to extract city, state, zip if present
+                        city_state_zip = re.search(r',\s*([A-Za-z]+),?\s*([A-Z]{2})?\s*(\d{5})?', user_message[address_match.end():], re.I)
+                        if city_state_zip:
+                            city = city_state_zip.group(1).strip() if city_state_zip.group(1) else ""
+                            state = city_state_zip.group(2).strip() if city_state_zip.group(2) else ""
+                            zip_code = city_state_zip.group(3).strip() if city_state_zip.group(3) else ""
+                            user_data['address'] = full_address
+                            if city:
+                                user_data['city'] = city
+                            if state:
+                                user_data['state'] = state
+                            if zip_code:
+                                user_data['zip'] = zip_code
+                        else:
+                            user_data['address'] = full_address
+                    else:
+                        # Fallback: try to find address pattern without street type
+                        address_match = re.search(r'(\d+\s+[A-Za-z\s]+)(?:,\s*([A-Za-z]+))?(?:,\s*([A-Z]{2}))?(?:\s+(\d{5}))?', user_message, re.I)
+                        if address_match:
+                            street = address_match.group(1).strip()
+                            city = address_match.group(2).strip() if address_match.group(2) else ""
+                            state = address_match.group(3).strip() if address_match.group(3) else ""
+                            zip_code = address_match.group(4).strip() if address_match.group(4) else ""
+                            user_data['address'] = street
+                            if city:
+                                user_data['city'] = city
+                            if state:
+                                user_data['state'] = state
+                            if zip_code:
+                                user_data['zip'] = zip_code
+                    
+                    # Check database for Texas template
+                    from template_manager import get_template_manager
+                    tm = get_template_manager(db)
+                    
+                    # Search for Texas ID template
+                    template = None
+                    all_templates = tm.list_templates()
                     for t in all_templates:
                         if isinstance(t, dict):
                             name = t.get('name', '').lower()
-                            if 'id' in name or 'driver' in name or 'license' in name:
+                            if 'texas' in name or ('id' in name and 'texas' in message_lower):
                                 template = t
                                 break
-                
-                template_name = template.get('name', 'texas_dl') if template else 'texas_dl'
-                
-                # Save user data to state for persistence
-                try:
-                    from user_state_manager import get_user_state_manager
-                    state_mgr = get_user_state_manager(db)
-                    state_mgr.save_state(user_id, 'user_data', user_data)
-                    logger.info(f"Saved user data to state: {user_data}")
-                except Exception as e:
-                    logger.warning(f"Could not save user data to state: {e}")
-                
-                # Generate ID
-                await update.message.reply_text("🔄 Detected photo + ID data! Generating Texas ID...")
-                
-                from id_template_processor import get_id_processor
-                id_processor = get_id_processor()
-                
-                filepath = id_processor.process_texas_id_with_photo(
-                    user_photo,
-                    template_name=template_name,
-                    user_data=user_data
-                )
-                
-                if filepath and PathLib(filepath).exists():
-                    # Send the generated ID
-                    with open(filepath, 'rb') as f:
-                        await update.message.reply_document(
-                            document=f,
-                            filename=PathLib(filepath).name,
-                            caption=f"✅ **Texas ID Generated**\n\n"
-                                   f"Name: {user_data.get('name', 'N/A')}\n"
-                                   f"DOB: {user_data.get('dob', 'N/A')}\n"
-                                   f"Address: {user_data.get('address', 'N/A')}"
-                        )
-                    logger.info(f"Auto-generated and sent ID: {filepath}")
                     
-                    # Mark result as delivered in state
+                    # If no template found, try to get any ID template
+                    if not template:
+                        for t in all_templates:
+                            if isinstance(t, dict):
+                                name = t.get('name', '').lower()
+                                if 'id' in name or 'driver' in name or 'license' in name:
+                                    template = t
+                                    break
+                    
+                    template_name = template.get('name', 'texas_dl') if template else 'texas_dl'
+                    
+                    # Save user data to state for persistence
                     try:
                         from user_state_manager import get_user_state_manager
                         state_mgr = get_user_state_manager(db)
-                        state_mgr.mark_result_delivered(user_id, 'id_image', filepath)
-                        state_mgr.clear_pending_task(user_id)
+                        state_mgr.save_state(user_id, 'user_data', user_data)
+                        logger.info(f"Saved user data to state: {user_data}")
                     except Exception as e:
-                        logger.warning(f"Could not update state: {e}")
+                        logger.warning(f"Could not save user data to state: {e}")
                     
-                    # Keep photo in state for future use (don't delete from context)
-                    return
-                else:
-                    logger.warning(f"ID generation failed, filepath: {filepath}")
+                    # Generate ID
+                    await update.message.reply_text("🔄 Detected photo + ID data! Generating Texas ID...")
+                    
+                    from id_template_processor import get_id_processor
+                    id_processor = get_id_processor()
+                    
+                    filepath = id_processor.process_texas_id_with_photo(
+                        user_photo,
+                        template_name=template_name,
+                        user_data=user_data
+                    )
+                    
+                    if filepath and PathLib(filepath).exists():
+                        # Send the generated ID
+                        with open(filepath, 'rb') as f:
+                            await update.message.reply_document(
+                                document=f,
+                                filename=PathLib(filepath).name,
+                                caption=f"✅ **Texas ID Generated**\n\n"
+                                       f"Name: {user_data.get('name', 'N/A')}\n"
+                                       f"DOB: {user_data.get('dob', 'N/A')}\n"
+                                       f"Address: {user_data.get('address', 'N/A')}"
+                            )
+                        logger.info(f"Auto-generated and sent ID: {filepath}")
+                        
+                        # Mark result as delivered in state
+                        try:
+                            from user_state_manager import get_user_state_manager
+                            state_mgr = get_user_state_manager(db)
+                            state_mgr.mark_result_delivered(user_id, 'id_image', filepath)
+                            state_mgr.clear_pending_task(user_id)
+                        except Exception as e:
+                            logger.warning(f"Could not update state: {e}")
+                        
+                        # Keep photo in state for future use (don't delete from context)
+                        return
+                    else:
+                        logger.warning(f"ID generation failed, filepath: {filepath}")
+                        # Continue to normal message handling
+                except Exception as e:
+                    logger.error(f"Error auto-generating ID: {e}", exc_info=True)
                     # Continue to normal message handling
-            except Exception as e:
-                logger.error(f"Error auto-generating ID: {e}", exc_info=True)
-                # Continue to normal message handling
     
     # Check if admin is searching for a user by ID
     pending_search_key = f'pending_search_{user_id}'
