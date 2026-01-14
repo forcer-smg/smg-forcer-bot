@@ -4436,14 +4436,34 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        # Download image
+        # Get user workspace for permanent photo storage
+        try:
+            from user_workspace_manager import UserWorkspaceManager
+            workspace_manager = UserWorkspaceManager.get_instance()
+            user_workspace = workspace_manager.get_user_workspace(user_id)
+            workspace = Path(user_workspace)
+        except ImportError:
+            base_workspace = os.getenv('WORKSPACE_ROOT', os.getcwd())
+            workspace = Path(base_workspace) / f"user_{user_id}"
+            workspace.mkdir(parents=True, exist_ok=True)
+        
+        # Download image to permanent location
         file = await context.bot.get_file(file_id)
-        image_path = f"temp_image_{user_id}_{file_id}.jpg"
-        await file.download_to_drive(image_path)
+        image_path = workspace / f"photo_{user_id}_{int(time.time())}.jpg"
+        await file.download_to_drive(str(image_path))
         
         # Store photo path in context for template processing
-        context.user_data['last_photo'] = image_path
+        context.user_data['last_photo'] = str(image_path)
         context.user_data['last_photo_time'] = time.time()
+        
+        # Persist photo to database state
+        try:
+            from user_state_manager import get_user_state_manager
+            state_mgr = get_user_state_manager(db)
+            state_mgr.save_state(user_id, 'last_photo', {'path': str(image_path), 'timestamp': time.time()}, workspace_path=str(workspace))
+            logger.info(f"Saved photo to state: {image_path}")
+        except Exception as e:
+            logger.warning(f"Could not save photo to state: {e}")
         
         # Get caption or use default
         caption = update.message.caption or "What is in this image? Describe it in detail."
@@ -4534,13 +4554,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error handling image: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Error: {str(e)}")
-    finally:
-        # Clean up temp file
-        try:
-            if 'image_path' in locals() and os.path.exists(image_path):
-                os.remove(image_path)
-        except:
-            pass
+    # Note: Photo is saved permanently in user workspace, not deleted
 
 
 async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
@@ -5213,9 +5227,12 @@ If you believe this is an error, please contact support.
         
         # Check if message looks like ID data (name, DOB, address pattern)
         import re
-        has_name = bool(re.search(r'name[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)', user_message, re.I))
+        # More flexible name detection: "NAME" keyword or capitalized words at start
+        has_name = bool(re.search(r'(?:name[:\s]+)?([A-Z][A-Z\s]+)', user_message)) or bool(re.search(r'^([A-Z][A-Z\s]{3,})', user_message))
+        # DOB detection: MM/DD/YYYY or MM-DD-YYYY
         has_dob = bool(re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', user_message))
-        has_address = bool(re.search(r'\d+\s+[A-Z][a-z]+.*(?:st|rd|ave|road|street)', user_message, re.I))
+        # Address detection: number + street name (Rd, St, Ave, Road, Street, etc.)
+        has_address = bool(re.search(r'\d+\s+[A-Za-z]+.*?(?:rd|st|ave|road|street|blvd|boulevard|drive|dr|ln|lane|ct|court|way|pl|place)', user_message, re.I))
         
         # If user mentions ID or has ID data pattern, auto-generate
         if has_id_keyword or (has_name and (has_dob or has_address)):
@@ -5240,13 +5257,16 @@ If you believe this is an error, please contact support.
                     logger.info(f"Using saved user data: {user_data}")
                 
                 # Then, extract/override from current message
-                # Extract name
-                name_match = re.search(r'name[:\s]+([^\n,]+)', user_message, re.I)
+                # Extract name - more flexible patterns
+                name_match = re.search(r'(?:name[:\s]+)?([A-Z][A-Z\s]{2,})', user_message)
                 if not name_match:
-                    # Try to find name pattern (First Last or FIRST LAST)
+                    # Try to find name at start of message (all caps or title case)
                     name_match = re.search(r'^([A-Z][A-Z\s]+)', user_message)
                 if name_match:
-                    user_data['name'] = name_match.group(1).strip().upper()
+                    name = name_match.group(1).strip().upper()
+                    # Remove "NAME" keyword if present
+                    name = re.sub(r'^NAME\s+', '', name, flags=re.I)
+                    user_data['name'] = name
                 
                 # Extract DOB
                 dob_match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', user_message)
@@ -5256,20 +5276,40 @@ If you believe this is an error, please contact support.
                         year = '20' + year if int(year) < 50 else '19' + year
                     user_data['dob'] = f"{month}/{day}/{year}"
                 
-                # Extract address
-                address_match = re.search(r'(\d+\s+[A-Z][a-z]+.*?)(?:,\s*([A-Z][a-z]+))?(?:,\s*([A-Z]{2}))?(?:\s+(\d{5}))?', user_message, re.I)
+                # Extract address - more flexible pattern
+                address_match = re.search(r'(\d+\s+[A-Za-z\s]+(?:rd|st|ave|road|street|blvd|boulevard|drive|dr|ln|lane|ct|court|way|pl|place)[^,\n]*)', user_message, re.I)
                 if address_match:
-                    street = address_match.group(1).strip()
-                    city = address_match.group(2).strip() if address_match.group(2) else ""
-                    state = address_match.group(3).strip() if address_match.group(3) else ""
-                    zip_code = address_match.group(4).strip() if address_match.group(4) else ""
-                    user_data['address'] = street
-                    if city:
-                        user_data['city'] = city
-                    if state:
-                        user_data['state'] = state
-                    if zip_code:
-                        user_data['zip'] = zip_code
+                    full_address = address_match.group(1).strip()
+                    # Try to extract city, state, zip if present
+                    city_state_zip = re.search(r',\s*([A-Za-z]+),?\s*([A-Z]{2})?\s*(\d{5})?', user_message[address_match.end():], re.I)
+                    if city_state_zip:
+                        city = city_state_zip.group(1).strip() if city_state_zip.group(1) else ""
+                        state = city_state_zip.group(2).strip() if city_state_zip.group(2) else ""
+                        zip_code = city_state_zip.group(3).strip() if city_state_zip.group(3) else ""
+                        user_data['address'] = full_address
+                        if city:
+                            user_data['city'] = city
+                        if state:
+                            user_data['state'] = state
+                        if zip_code:
+                            user_data['zip'] = zip_code
+                    else:
+                        user_data['address'] = full_address
+                else:
+                    # Fallback: try to find address pattern without street type
+                    address_match = re.search(r'(\d+\s+[A-Za-z\s]+)(?:,\s*([A-Za-z]+))?(?:,\s*([A-Z]{2}))?(?:\s+(\d{5}))?', user_message, re.I)
+                    if address_match:
+                        street = address_match.group(1).strip()
+                        city = address_match.group(2).strip() if address_match.group(2) else ""
+                        state = address_match.group(3).strip() if address_match.group(3) else ""
+                        zip_code = address_match.group(4).strip() if address_match.group(4) else ""
+                        user_data['address'] = street
+                        if city:
+                            user_data['city'] = city
+                        if state:
+                            user_data['state'] = state
+                        if zip_code:
+                            user_data['zip'] = zip_code
                 
                 # Check database for Texas template
                 from template_manager import get_template_manager
@@ -5295,6 +5335,15 @@ If you believe this is an error, please contact support.
                                 break
                 
                 template_name = template.get('name', 'texas_dl') if template else 'texas_dl'
+                
+                # Save user data to state for persistence
+                try:
+                    from user_state_manager import get_user_state_manager
+                    state_mgr = get_user_state_manager(db)
+                    state_mgr.save_state(user_id, 'user_data', user_data)
+                    logger.info(f"Saved user data to state: {user_data}")
+                except Exception as e:
+                    logger.warning(f"Could not save user data to state: {e}")
                 
                 # Generate ID
                 await update.message.reply_text("🔄 Detected photo + ID data! Generating Texas ID...")
