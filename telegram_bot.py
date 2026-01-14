@@ -4606,37 +4606,37 @@ async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
             
             # Check file type by extension
             if file_ext in document_extensions:
-            if file_ext == '.pdf':
-                file_type = 'pdf'
-            elif file_ext in ['.doc', '.docx']:
-                file_type = 'word'
-            elif file_ext in ['.xls', '.xlsx']:
-                file_type = 'excel'
-            elif file_ext in ['.ppt', '.pptx']:
-                file_type = 'powerpoint'
-            else:
-                file_type = 'document'
-        elif file_ext in archive_extensions:
-            file_type = 'archive'
-        elif file_ext in image_extensions:
-            file_type = 'image'
-        elif file_ext in video_extensions:
-            file_type = 'video'
-        elif file_ext in audio_extensions:
-            file_type = 'audio'
-        elif file_ext in code_extensions:
-            file_type = 'code'
-            # More specific types
-            if file_ext in ['.py', '.pyw']:
-                file_type = 'python'
-            elif file_ext in ['.js', '.ts', '.jsx', '.tsx']:
-                file_type = 'javascript'
-            elif file_ext in ['.sh', '.bash', '.zsh']:
-                file_type = 'shell'
-        elif file_ext in config_extensions:
-            file_type = 'config'
-        elif file_ext in text_extensions:
-            file_type = 'text'
+                if file_ext == '.pdf':
+                    file_type = 'pdf'
+                elif file_ext in ['.doc', '.docx']:
+                    file_type = 'word'
+                elif file_ext in ['.xls', '.xlsx']:
+                    file_type = 'excel'
+                elif file_ext in ['.ppt', '.pptx']:
+                    file_type = 'powerpoint'
+                else:
+                    file_type = 'document'
+            elif file_ext in archive_extensions:
+                file_type = 'archive'
+            elif file_ext in image_extensions:
+                file_type = 'image'
+            elif file_ext in video_extensions:
+                file_type = 'video'
+            elif file_ext in audio_extensions:
+                file_type = 'audio'
+            elif file_ext in code_extensions:
+                file_type = 'code'
+                # More specific types
+                if file_ext in ['.py', '.pyw']:
+                    file_type = 'python'
+                elif file_ext in ['.js', '.ts', '.jsx', '.tsx']:
+                    file_type = 'javascript'
+                elif file_ext in ['.sh', '.bash', '.zsh']:
+                    file_type = 'shell'
+            elif file_ext in config_extensions:
+                file_type = 'config'
+            elif file_ext in text_extensions:
+                file_type = 'text'
         else:
             file_type = 'unknown'
         
