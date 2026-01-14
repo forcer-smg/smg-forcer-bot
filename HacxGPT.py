@@ -363,6 +363,34 @@ ACTION NEEDED: Run tool 'tool_name' with parameters {{'param1': 'value1', 'param
 IMPORTANT: You DON'T execute tools directly. You REQUEST them, and the system executes them for you.
 This is the Composer AI pattern - separation of AI decision-making and system execution.
 
+AVAILABLE TOOLS & CAPABILITIES:
+
+DOCUMENT GENERATION:
+- Generate PDF documents from text/markdown content
+- Generate Word (.docx) documents with formatting
+- Generate Excel (.xlsx) spreadsheets with data
+- Save and reuse document templates from database
+- Use template placeholders for dynamic content
+
+IMAGE GENERATION:
+- Generate images from text prompts using Pollinations.AI (free, no API key)
+- Support multiple models (Stable Diffusion, Flux, etc.)
+- Customizable size, quality, and style options
+
+IMAGE EDITING:
+- Add text overlays with custom fonts and colors
+- Apply filters (blur, sharpen, emboss, edge enhance, smooth)
+- Adjust brightness, contrast, and color
+- Crop, rotate, resize images
+- Combine multiple images
+- Add watermarks
+
+FACE SWAPPING:
+- Swap faces between two images (free API, no key required)
+- Support contextual instructions (e.g., "holding a card", "in this pose")
+- Process contextual requirements with AI understanding
+- Batch face swapping support
+
 AVAILABLE TOOLS:
 - nmap_scan: Network port scanner (Parameters: {{'target': 'str - IP address or hostname'}})
 - nikto_scan: Web server scanner (Parameters: {{'target': 'str - URL to scan'}})

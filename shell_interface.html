@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Railway Shell Interface</title>
+    <meta charset="UTF-8">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Courier New', monospace;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 { color: #4ec9b0; margin-bottom: 20px; }
+        .section {
+            background: #252526;
+            border: 1px solid #3e3e42;
+            border-radius: 5px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .command-input {
+            width: 100%;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border: 1px solid #3e3e42;
+            padding: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            border-radius: 3px;
+        }
+        .button {
+            background: #007acc;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            cursor: pointer;
+            border-radius: 3px;
+            margin: 5px;
+        }
+        .button:hover { background: #005a9e; }
+        .output {
+            background: #1e1e1e;
+            color: #4ec9b0;
+            padding: 15px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #3e3e42;
+        }
+        .error { color: #f48771; }
+        .success { color: #4ec9b0; }
+        .password-input {
+            width: 300px;
+            padding: 8px;
+            margin-bottom: 10px;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border: 1px solid #3e3e42;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 Railway Shell Interface</h1>
+        
+        <div class="section">
+            <h3>Authentication</h3>
+            <input type="password" id="password" class="password-input" placeholder="Enter dashboard password" value="admin123">
+        </div>
+        
+        <div class="section">
+            <h3>Run Command</h3>
+            <input type="text" id="command" class="command-input" placeholder="Enter command (e.g., python3 verify_tools.py)">
+            <button class="button" onclick="runCommand()">Execute</button>
+            <button class="button" onclick="checkTools()">Check Tools</button>
+            <button class="button" onclick="quickInstall()">Quick Install Tools</button>
+            <div id="output" class="output"></div>
+        </div>
+        
+        <div class="section">
+            <h3>Quick Commands</h3>
+            <button class="button" onclick="runQuick('python3 verify_tools.py')">Verify Tools</button>
+            <button class="button" onclick="runQuick('which nmap')">Check nmap</button>
+            <button class="button" onclick="runQuick('which nuclei')">Check nuclei</button>
+            <button class="button" onclick="runQuick('which sqlmap')">Check sqlmap</button>
+            <button class="button" onclick="runQuick('ls ~/go/bin/')">List Go Tools</button>
+            <button class="button" onclick="runQuick('pip3 list | grep -E \"(click|flask)\"')">Check Click/Flask</button>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = window.location.origin;
+        
+        function getPassword() {
+            return document.getElementById('password').value;
+        }
+        
+        function showOutput(text, isError = false) {
+            const output = document.getElementById('output');
+            output.textContent = text;
+            output.className = 'output ' + (isError ? 'error' : 'success');
+        }
+        
+        async function runCommand() {
+            const command = document.getElementById('command').value;
+            if (!command) {
+                showOutput('Please enter a command', true);
+                return;
+            }
+            
+            showOutput('Executing: ' + command + '\n\n...');
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/run-command?password=${encodeURIComponent(getPassword())}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Command-Password': getPassword()
+                    },
+                    body: JSON.stringify({ command: command })
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    showOutput('Error: ' + data.error, true);
+                } else {
+                    let output = `Command: ${command}\n`;
+                    output += `Exit Code: ${data.exit_code}\n\n`;
+                    if (data.stdout) output += `STDOUT:\n${data.stdout}\n\n`;
+                    if (data.stderr) output += `STDERR:\n${data.stderr}\n`;
+                    showOutput(output, data.exit_code !== 0);
+                }
+            } catch (error) {
+                showOutput('Error: ' + error.message, true);
+            }
+        }
+        
+        async function checkTools() {
+            showOutput('Checking installed tools...\n\n...');
+            try {
+                const response = await fetch(`${API_BASE}/api/check-tools?password=${encodeURIComponent(getPassword())}`);
+                const data = await response.json();
+                if (data.error) {
+                    showOutput('Error: ' + data.error, true);
+                } else {
+                    showOutput(data.output || 'No output');
+                }
+            } catch (error) {
+                showOutput('Error: ' + error.message, true);
+            }
+        }
+        
+        async function quickInstall() {
+            showOutput('Installing additional tools...\n\n...');
+            await runQuick('bash quick_install_tools.sh');
+        }
+        
+        async function runQuick(cmd) {
+            document.getElementById('command').value = cmd;
+            await runCommand();
+        }
+        
+        // Allow Enter key to execute
+        document.getElementById('command').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                runCommand();
+            }
+        });
+    </script>
+</body>
+</html>

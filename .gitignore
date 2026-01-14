@@ -70,3 +70,68 @@ debug_*.py
 # Uncomment if you want to keep admins.txt private
 # admins.txt
 
+# Development and deployment scripts (not needed in production)
+*.bat
+*.ps1
+*.sh
+!install.sh
+!post_deploy_setup.sh
+!install_tools.sh
+
+# Documentation files (keep only essential)
+*.md
+!README.md
+!LICENSE.txt
+
+# Checkpoints and backups
+checkpoints/
+*.backup
+*.bak
+*.old
+
+# Temporary and utility files
+*.tmp
+*.txt
+!requirements.txt
+!requirements_production.txt
+!LICENSE.txt
+!CONFIG_EXAMPLE.txt
+!RAILWAY_VARIABLES.txt
+
+# IDE and editor files
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Deployment scripts (keep only essential)
+deploy_*.ps1
+*_FIX*.bat
+*_FIX*.ps1
+*_PUSH*.bat
+*_PUSH*.ps1
+*_SETUP*.bat
+*_SETUP*.ps1
+!setup.py
+
+# Test and debug files
+test_*.py
+*_test.py
+debug_*.py
+check_*.py
+verify_*.py
+!check_requirements.py
+
+# Output and result files
+*.log
+*.out
+*.err
+*_output.txt
+*_results.txt
+pip_*.txt
+
+# Railway and deployment configs (keep essential)
+railway.json
+ecosystem.config.js

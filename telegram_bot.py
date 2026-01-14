@@ -3067,6 +3067,361 @@ async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message, parse_mode='Markdown')
 
 
+# ==================== Document Generation Commands ====================
+
+async def generate_document_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /generate_document command"""
+    user_id = update.effective_user.id
+    user_message = ' '.join(context.args) if context.args else None
+    
+    if not user_message:
+        await update.message.reply_text(
+            "📄 *Document Generator*\n\n"
+            "Usage: `/generate_document [type] [content]`\n"
+            "Types: `pdf`, `word`, `excel`\n\n"
+            "Example: `/generate_document pdf This is my document content`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        from document_generator import get_document_generator
+        
+        doc_gen = get_document_generator()
+        
+        # Parse type and content
+        parts = user_message.split(' ', 1)
+        doc_type = parts[0].lower() if len(parts) > 1 else 'pdf'
+        content = parts[1] if len(parts) > 1 else user_message
+        
+        # Generate document
+        if doc_type == 'pdf':
+            filepath = doc_gen.generate_pdf(content, title="Generated Document")
+        elif doc_type == 'word' or doc_type == 'docx':
+            filepath = doc_gen.generate_word(content, title="Generated Document")
+        elif doc_type == 'excel' or doc_type == 'xlsx':
+            # For Excel, convert content to table format
+            rows = [[cell] for cell in content.split('\n')]
+            filepath = doc_gen.generate_excel(rows)
+        else:
+            await update.message.reply_text(f"❌ Unknown document type: {doc_type}")
+            return
+        
+        if filepath:
+            with open(filepath, 'rb') as f:
+                await update.message.reply_document(document=f, filename=Path(filepath).name)
+        else:
+            await update.message.reply_text("❌ Failed to generate document")
+            
+    except Exception as e:
+        logger.error(f"Error generating document: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def generate_pdf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /generate_pdf command"""
+    user_message = ' '.join(context.args) if context.args else None
+    
+    if not user_message:
+        await update.message.reply_text("Usage: `/generate_pdf [content]`", parse_mode='Markdown')
+        return
+    
+    try:
+        from document_generator import get_document_generator
+        doc_gen = get_document_generator()
+        filepath = doc_gen.generate_pdf(user_message, title="Generated PDF")
+        
+        if filepath:
+            with open(filepath, 'rb') as f:
+                await update.message.reply_document(document=f, filename=Path(filepath).name)
+        else:
+            await update.message.reply_text("❌ Failed to generate PDF")
+    except Exception as e:
+        logger.error(f"Error generating PDF: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def generate_word_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /generate_word command"""
+    user_message = ' '.join(context.args) if context.args else None
+    
+    if not user_message:
+        await update.message.reply_text("Usage: `/generate_word [content]`", parse_mode='Markdown')
+        return
+    
+    try:
+        from document_generator import get_document_generator
+        doc_gen = get_document_generator()
+        filepath = doc_gen.generate_word(user_message, title="Generated Document")
+        
+        if filepath:
+            with open(filepath, 'rb') as f:
+                await update.message.reply_document(document=f, filename=Path(filepath).name)
+        else:
+            await update.message.reply_text("❌ Failed to generate Word document")
+    except Exception as e:
+        logger.error(f"Error generating Word document: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def generate_excel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /generate_excel command"""
+    user_message = ' '.join(context.args) if context.args else None
+    
+    if not user_message:
+        await update.message.reply_text("Usage: `/generate_excel [data]`\nFormat: Each line is a row, comma-separated values", parse_mode='Markdown')
+        return
+    
+    try:
+        from document_generator import get_document_generator
+        doc_gen = get_document_generator()
+        
+        # Parse CSV-like data
+        rows = [line.split(',') for line in user_message.split('\n') if line.strip()]
+        filepath = doc_gen.generate_excel(rows)
+        
+        if filepath:
+            with open(filepath, 'rb') as f:
+                await update.message.reply_document(document=f, filename=Path(filepath).name)
+        else:
+            await update.message.reply_text("❌ Failed to generate Excel spreadsheet")
+    except Exception as e:
+        logger.error(f"Error generating Excel: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+# ==================== Template Management Commands ====================
+
+async def save_template_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /save_template command"""
+    user_id = update.effective_user.id
+    args = context.args
+    
+    if not args or len(args) < 2:
+        await update.message.reply_text(
+            "💾 *Save Template*\n\n"
+            "Usage: `/save_template [name] [type] [category]`\n"
+            "Types: `pdf`, `word`, `excel`\n\n"
+            "Example: `/save_template invoice_template pdf invoice`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        from template_manager import get_template_manager
+        template_mgr = get_template_manager(db)
+        
+        name = args[0]
+        template_type = args[1] if len(args) > 1 else 'pdf'
+        category = args[2] if len(args) > 2 else None
+        
+        # Get last generated document (would need to track this)
+        # For now, create a basic template
+        template_data = {
+            'content': 'Template content',
+            'options': {}
+        }
+        
+        template_id = template_mgr.save_template(
+            user_id=user_id,
+            name=name,
+            template_type=template_type,
+            template_data=template_data,
+            category=category
+        )
+        
+        if template_id:
+            await update.message.reply_text(f"✅ Template saved: `{name}` (ID: {template_id})", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("❌ Failed to save template")
+            
+    except Exception as e:
+        logger.error(f"Error saving template: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def use_template_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /use_template command"""
+    user_id = update.effective_user.id
+    template_name = ' '.join(context.args) if context.args else None
+    
+    if not template_name:
+        await update.message.reply_text("Usage: `/use_template [template_name]`", parse_mode='Markdown')
+        return
+    
+    try:
+        from template_manager import get_template_manager
+        from document_generator import get_document_generator
+        
+        template_mgr = get_template_manager(db)
+        template = template_mgr.get_template(name=template_name, user_id=user_id)
+        
+        if not template:
+            await update.message.reply_text(f"❌ Template not found: `{template_name}`", parse_mode='Markdown')
+            return
+        
+        doc_gen = get_document_generator()
+        filepath = doc_gen.generate_from_template(
+            template['template_data'],
+            doc_type=template['type'],
+            variables={}  # Can be enhanced to accept variables
+        )
+        
+        if filepath:
+            with open(filepath, 'rb') as f:
+                await update.message.reply_document(document=f, filename=Path(filepath).name)
+        else:
+            await update.message.reply_text("❌ Failed to generate document from template")
+            
+    except Exception as e:
+        logger.error(f"Error using template: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def list_templates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /list_templates command"""
+    user_id = update.effective_user.id
+    
+    try:
+        from template_manager import get_template_manager
+        template_mgr = get_template_manager(db)
+        templates = template_mgr.list_templates(user_id=user_id)
+        
+        if not templates:
+            await update.message.reply_text("📋 No templates found. Use `/save_template` to create one.", parse_mode='Markdown')
+            return
+        
+        message = "📋 *Your Templates:*\n\n"
+        for template in templates:
+            scope = "🌐 Global" if template['is_global'] else "👤 Personal"
+            message += f"• `{template['name']}` ({template['type']}) - {scope}\n"
+            if template.get('description'):
+                message += f"  _{template['description']}_\n"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Error listing templates: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def delete_template_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /delete_template command"""
+    user_id = update.effective_user.id
+    template_name = ' '.join(context.args) if context.args else None
+    
+    if not template_name:
+        await update.message.reply_text("Usage: `/delete_template [template_name]`", parse_mode='Markdown')
+        return
+    
+    try:
+        from template_manager import get_template_manager
+        template_mgr = get_template_manager(db)
+        
+        template = template_mgr.get_template(name=template_name, user_id=user_id)
+        if not template:
+            await update.message.reply_text(f"❌ Template not found: `{template_name}`", parse_mode='Markdown')
+            return
+        
+        if template_mgr.delete_template(template['id'], user_id=user_id):
+            await update.message.reply_text(f"✅ Template deleted: `{template_name}`", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("❌ Failed to delete template (check permissions)")
+            
+    except Exception as e:
+        logger.error(f"Error deleting template: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+# ==================== Image Generation Commands ====================
+
+async def generate_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /generate_image command"""
+    prompt = ' '.join(context.args) if context.args else None
+    
+    if not prompt:
+        await update.message.reply_text(
+            "🎨 *Image Generator*\n\n"
+            "Usage: `/generate_image [prompt]`\n\n"
+            "Example: `/generate_image a beautiful sunset over mountains`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        from image_generator import get_image_generator
+        
+        await update.message.reply_text("🎨 Generating image... This may take a moment.")
+        
+        img_gen = get_image_generator()
+        filepath = img_gen.generate_image(prompt)
+        
+        if filepath:
+            with open(filepath, 'rb') as f:
+                await update.message.reply_photo(photo=f)
+        else:
+            await update.message.reply_text("❌ Failed to generate image")
+            
+    except Exception as e:
+        logger.error(f"Error generating image: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+# ==================== Image Editing Commands ====================
+
+async def edit_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /edit_image command"""
+    await update.message.reply_text(
+        "🖼️ *Image Editor*\n\n"
+        "Upload an image and use one of these commands:\n"
+        "• `/add_text [text]` - Add text overlay\n"
+        "• `/apply_filter [type]` - Apply filter (blur, sharpen, etc.)\n"
+        "• `/crop [x1,y1,x2,y2]` - Crop image\n"
+        "• `/rotate [angle]` - Rotate image\n"
+        "• `/resize [width]x[height]` - Resize image",
+        parse_mode='Markdown'
+    )
+
+
+# ==================== Face Swap Commands ====================
+
+async def face_swap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /face_swap command"""
+    user_id = update.effective_user.id
+    
+    # Check if user has uploaded images
+    if update.message.photo or update.message.document:
+        # Store images in context for processing
+        context.user_data['face_swap_pending'] = True
+        await update.message.reply_text(
+            "🔄 *Face Swap*\n\n"
+            "Please send two images:\n"
+            "1. Source image (face to copy)\n"
+            "2. Target image (face to replace)\n\n"
+            "You can also add context: `/face_swap holding a card`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    context_instruction = ' '.join(context.args) if context.args else None
+    
+    if context_instruction:
+        context.user_data['face_swap_context'] = context_instruction
+        await update.message.reply_text(
+            f"✅ Context saved: `{context_instruction}`\n"
+            "Now send two images for face swap.",
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            "🔄 *Face Swap*\n\n"
+            "Usage: Send two images (source + target) or use:\n"
+            "`/face_swap [context]`\n\n"
+            "Example: `/face_swap holding a card`",
+            parse_mode='Markdown'
+        )
+
+
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle image messages - process with vision models"""
     user_id = update.effective_user.id
@@ -3097,25 +3452,39 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Process image with vision models
         try:
-            from desktop_ai_handler import DesktopAIHandler
-            from HacxGPT import HacxBrain
-            from telegram_bot_module import TelegramUI
+            # Try to use DesktopAIHandler, fallback to vision_processor
+            try:
+                from desktop_ai_handler import DesktopAIHandler
+                handler_available = True
+            except ImportError:
+                handler_available = False
+                from vision_processor import get_vision_processor
             
             brain = get_user_brain(user_id)
-            workspace = os.path.join(os.getcwd(), f"user_{user_id}")
-            os.makedirs(workspace, exist_ok=True)
             
-            desktop_handler = DesktopAIHandler(brain, workspace_root=workspace, user_id=user_id)
-            
-            # Process image
-            result = await desktop_handler.process_image(image_path, caption)
-            
-            if result.get('success'):
-                response_text = result.get('result', 'Image processed successfully')
-                await update.message.reply_text(f"🖼️ **Image Analysis:**\n\n{response_text}", parse_mode='Markdown')
+            if handler_available:
+                workspace = os.path.join(os.getcwd(), f"user_{user_id}")
+                os.makedirs(workspace, exist_ok=True)
+                desktop_handler = DesktopAIHandler(brain, workspace_root=workspace, user_id=user_id)
+                result = await desktop_handler.process_image(image_path, caption)
+                
+                if result.get('success'):
+                    response_text = result.get('result', 'Image processed successfully')
+                    await update.message.reply_text(f"🖼️ **Image Analysis:**\n\n{response_text}", parse_mode='Markdown')
+                else:
+                    error = result.get('error', 'Unknown error')
+                    await update.message.reply_text(f"❌ **Error processing image:**\n{error}")
             else:
-                error = result.get('error', 'Unknown error')
-                await update.message.reply_text(f"❌ **Error processing image:**\n{error}")
+                # Fallback: use vision processor directly
+                vision_proc = get_vision_processor()
+                result = vision_proc.process_image(image_path, prompt=caption)
+                
+                if result.get('success'):
+                    response_text = result.get('result', 'Image processed successfully')
+                    await update.message.reply_text(f"🖼️ **Image Analysis:**\n\n{response_text}", parse_mode='Markdown')
+                else:
+                    error = result.get('error', 'Unknown error')
+                    await update.message.reply_text(f"❌ **Error processing image:**\n{error}")
         
         except Exception as e:
             logger.error(f"Image processing error: {e}", exc_info=True)
@@ -3269,20 +3638,31 @@ async def handle_enhancement_request(query, data: str, user_id: int, context: Co
             # Just analyze, don't enhance
             await query.edit_message_text("🔍 Analyzing code...")
             try:
-                from desktop_ai_handler import DesktopAIHandler
-                from HacxGPT import get_user_brain
+                # Try to import DesktopAIHandler, fallback to direct brain usage
+                try:
+                    from desktop_ai_handler import DesktopAIHandler
+                    handler_available = True
+                except ImportError:
+                    handler_available = False
+                    logger.warning("DesktopAIHandler not available, using direct brain access")
                 
                 brain = get_user_brain(user_id)
-                workspace = Path(file_path).parent
-                handler = DesktopAIHandler(brain, workspace_root=str(workspace), user_id=user_id)
                 
                 # Read and analyze code
-                code = Path(file_path).read_text(encoding='utf-8')
+                code = Path(file_path).read_text(encoding='utf-8', errors='ignore')
                 analysis_prompt = f"Analyze this code in detail:\n\n```python\n{code[:2000]}\n```\n\nProvide a comprehensive analysis."
                 
-                analysis_result = ""
-                for chunk in handler.stream_ai_response(analysis_prompt):
-                    analysis_result += chunk
+                if handler_available:
+                    workspace = Path(file_path).parent
+                    handler = DesktopAIHandler(brain, workspace_root=str(workspace), user_id=user_id)
+                    analysis_result = ""
+                    for chunk in handler.stream_ai_response(analysis_prompt):
+                        analysis_result += chunk
+                else:
+                    # Fallback: use brain directly
+                    analysis_result = ""
+                    for chunk in brain.chat(analysis_prompt):
+                        analysis_result += chunk
                 
                 await query.edit_message_text(
                     f"📊 **Code Analysis:** `{file_name}`\n\n{analysis_result[:3000]}",
@@ -3297,20 +3677,46 @@ async def handle_enhancement_request(query, data: str, user_id: int, context: Co
         await query.edit_message_text(f"✨ Enhancing code ({enhancement_type})...")
         
         try:
-            from desktop_ai_handler import DesktopAIHandler
-            from HacxGPT import get_user_brain
+            # Try to import DesktopAIHandler, fallback to direct brain usage
+            try:
+                from desktop_ai_handler import DesktopAIHandler
+                handler_available = True
+            except ImportError:
+                handler_available = False
+                logger.warning("DesktopAIHandler not available, using direct brain access")
             
             brain = get_user_brain(user_id)
-            workspace = Path(file_path).parent
-            handler = DesktopAIHandler(brain, workspace_root=str(workspace), user_id=user_id)
             
-            # Enhance code
-            enhanced_path, review = await handler.enhance_uploaded_code(
-                file_path, enhancement_type, query.message, context
-            )
-            
-            # Send enhanced file
-            if Path(enhanced_path).exists():
+            if handler_available:
+                workspace = Path(file_path).parent
+                handler = DesktopAIHandler(brain, workspace_root=str(workspace), user_id=user_id)
+                
+                # Enhance code
+                enhanced_path, review = await handler.enhance_uploaded_code(
+                    file_path, enhancement_type, query.message, context
+                )
+                
+                # Send enhanced file
+                if Path(enhanced_path).exists():
+                    with open(enhanced_path, 'rb') as f:
+                        await query.message.reply_document(
+                            document=f,
+                            filename=f"enhanced_{file_name}",
+                            caption=f"✨ Enhanced code ({enhancement_type})"
+                        )
+            else:
+                # Fallback: use brain directly to enhance
+                code = Path(file_path).read_text(encoding='utf-8', errors='ignore')
+                enhancement_prompt = f"Enhance this code ({enhancement_type}):\n\n```python\n{code[:2000]}\n```"
+                
+                enhanced_code = ""
+                for chunk in brain.chat(enhancement_prompt):
+                    enhanced_code += chunk
+                
+                # Save enhanced code
+                enhanced_path = Path(file_path).parent / f"enhanced_{file_name}"
+                enhanced_path.write_text(enhanced_code, encoding='utf-8')
+                
                 with open(enhanced_path, 'rb') as f:
                     await query.message.reply_document(
                         document=f,
@@ -3820,7 +4226,16 @@ You've used all your available requests.
         
         # Use desktop AI handler (full desktop app approach)
         try:
-            from desktop_ai_handler import DesktopAIHandler
+            try:
+                from desktop_ai_handler import DesktopAIHandler
+                DESKTOP_HANDLER_AVAILABLE = True
+            except ImportError:
+                DESKTOP_HANDLER_AVAILABLE = False
+                logger.warning("DesktopAIHandler not available, using basic streaming")
+            
+            if not DESKTOP_HANDLER_AVAILABLE:
+                # Fallback to basic streaming without DesktopAIHandler
+                raise ImportError("DesktopAIHandler not available")
             
             # Get workspace for user (isolated per-user workspace for concurrent safety)
             # Use UserWorkspaceManager for proper isolation
@@ -3836,9 +4251,12 @@ You've used all your available requests.
                 os.makedirs(workspace, exist_ok=True)
                 logger.warning("UserWorkspaceManager not available, using fallback workspace isolation")
             
-            logger.info(f"Initializing DesktopAIHandler for user {user_id} with workspace: {workspace}")
-            desktop_handler = DesktopAIHandler(brain, workspace_root=workspace, user_id=user_id)
-            logger.info(f"DesktopAIHandler initialized successfully for user {user_id}")
+            if DESKTOP_HANDLER_AVAILABLE:
+                logger.info(f"Initializing DesktopAIHandler for user {user_id} with workspace: {workspace}")
+                desktop_handler = DesktopAIHandler(brain, workspace_root=workspace, user_id=user_id)
+                logger.info(f"DesktopAIHandler initialized successfully for user {user_id}")
+            else:
+                raise ImportError("DesktopAIHandler not available")
             
             # Load memory context and store user message
             if SECURE_MEMORY_AVAILABLE and secure_memory:
@@ -4715,6 +5133,27 @@ def main():
     application.add_handler(CommandHandler("admin_users", admin_users))
     application.add_handler(CommandHandler("admin_add", admin_add))
     application.add_handler(CommandHandler("admin_upgrade", admin_upgrade))
+    
+    # Document generation commands
+    application.add_handler(CommandHandler("generate_document", generate_document_command))
+    application.add_handler(CommandHandler("generate_pdf", generate_pdf_command))
+    application.add_handler(CommandHandler("generate_word", generate_word_command))
+    application.add_handler(CommandHandler("generate_excel", generate_excel_command))
+    
+    # Template management commands
+    application.add_handler(CommandHandler("save_template", save_template_command))
+    application.add_handler(CommandHandler("use_template", use_template_command))
+    application.add_handler(CommandHandler("list_templates", list_templates_command))
+    application.add_handler(CommandHandler("delete_template", delete_template_command))
+    
+    # Image generation commands
+    application.add_handler(CommandHandler("generate_image", generate_image_command))
+    
+    # Image editing commands
+    application.add_handler(CommandHandler("edit_image", edit_image_command))
+    
+    # Face swap commands
+    application.add_handler(CommandHandler("face_swap", face_swap_command))
     
     # Add approval callback handler
     application.add_handler(CallbackQueryHandler(handle_approval_callback, pattern=r'^(approve|reject):'))

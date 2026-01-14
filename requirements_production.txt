@@ -1,0 +1,27 @@
+# Production requirements for SMG-Forcer Telegram Bot
+
+# Core dependencies
+python-telegram-bot>=20.0
+python-dotenv>=1.0.0
+
+# Database (choose one based on your setup)
+# For SQLite (default - included in Python):
+# No additional package needed
+
+# For PostgreSQL/Supabase:
+psycopg2-binary>=2.9.0
+
+# For MySQL (if using cPanel):
+# mysql-connector-python>=8.0.0
+# or
+# PyMySQL>=1.0.0
+
+# Additional utilities
+httpx>=0.24.0
+
+# Optional: For better logging
+colorlog>=6.7.0
+
+# Optional: For monitoring
+# prometheus-client>=0.17.0
+

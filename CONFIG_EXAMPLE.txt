@@ -1,0 +1,44 @@
+# SMG-Forcer Configuration File (.hacx)
+# This file contains all your API keys and configuration
+
+# Telegram Bot Token (from @BotFather)
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+
+# Primary AI API Key (DeepSeek)
+SMG-Forcer-API=sk-your-deepseek-api-key-here
+
+# Fallback AI API Key (OpenRouter) - Required for dual API mode
+OPENROUTER_API_KEY=sk-or-your-openrouter-api-key-here
+
+# OxaPay Payment Gateway
+OXAPAY_API_KEY=your_oxapay_api_key
+OXAPAY_MERCHANT_ID=your_oxapay_merchant_id
+
+# Dashboard Password
+DASHBOARD_PASSWORD=admin123
+
+# Vision Model APIs (Optional - for image processing)
+# Hugging Face API Key for vision models
+HUGGINGFACE_API_KEY=your_huggingface_api_key_here
+
+# OpenRouter API Key for vision models (alternative to Hugging Face)
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+
+# Sandbox Settings (Optional - for command validation)
+# Enable sandbox testing for commands (true/false)
+SANDBOX_ENABLED=true
+
+# Sandbox timeout in seconds (default: 30)
+SANDBOX_TIMEOUT=30
+
+# Maximum file size for Telegram file sending (in bytes, default: 50MB)
+MAX_FILE_SIZE=52428800
+
+# Notes:
+# - Remove comments (#) when adding values
+# - Don't use quotes around values
+# - Keep this file secure - never share it publicly
+# - For dual API mode, both SMG-Forcer-API and OPENROUTER_API_KEY are needed
+# - Vision models require either HUGGINGFACE_API_KEY or OPENROUTER_API_KEY
+# - Sandbox validation helps prevent false positive command executions
+
