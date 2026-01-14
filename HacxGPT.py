@@ -1158,66 +1158,73 @@ Match these behavior patterns in ALL your responses. Reference EXPECTED_BEHAVIOR
                     import asyncio
                     # Fetch current information from Eden AI (synchronous wrapper)
                     try:
-                        # Create or get event loop
+                        # Check if we're in an async context (event loop is running)
                         try:
-                            loop = asyncio.get_event_loop()
+                            loop = asyncio.get_running_loop()
+                            # Event loop is running - can't use run_until_complete
+                            # Skip Eden AI enhancement in this case to avoid RuntimeError
+                            logger.debug("Event loop is running, skipping Eden AI enhancement to avoid async conflict")
                         except RuntimeError:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                        
-                        # Determine search type based on query
-                        query_lower = user_input.lower()
-                        
-                        # Check for CVE queries
-                        if any(keyword in query_lower for keyword in ['cve', 'cve-', 'vulnerability', 'vuln']):
-                            # Extract CVE ID if present
-                            import re
-                            cve_match = re.search(r'CVE-\d{4}-\d{4,}', user_input, re.IGNORECASE)
-                            cve_id = cve_match.group(0).upper() if cve_match else None
+                            # No running loop - safe to use run_until_complete
+                            try:
+                                loop = asyncio.get_event_loop()
+                            except RuntimeError:
+                                loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(loop)
                             
-                            results = loop.run_until_complete(eden_ai.search_cve(cve_id=cve_id, query=user_input, num_results=3))
-                            if results:
-                                enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - CVE Search]:\n{eden_ai.format_search_results(results, 'cve')}"
-                        # Check for POC queries
-                        elif any(keyword in query_lower for keyword in ['poc', 'proof of concept', 'exploit code', 'github poc']):
-                            # Extract CVE ID if present
-                            import re
-                            cve_match = re.search(r'CVE-\d{4}-\d{4,}', user_input, re.IGNORECASE)
-                            cve_id = cve_match.group(0).upper() if cve_match else None
+                            # Determine search type based on query
+                            query_lower = user_input.lower()
                             
-                            results = loop.run_until_complete(eden_ai.search_poc(user_input, cve_id=cve_id, num_results=3))
-                            if results:
-                                enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - POC Search]:\n{eden_ai.format_search_results(results, 'poc')}"
-                        # Check for exploit queries
-                        elif any(keyword in query_lower for keyword in ['exploit', 'metasploit', 'exploit-db', 'working exploit']):
-                            results = loop.run_until_complete(eden_ai.search_exploit(user_input, num_results=3))
-                            if results:
-                                enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - Exploit Search]:\n{eden_ai.format_search_results(results, 'exploit')}"
-                        # Check for hacking techniques queries
-                        elif any(keyword in query_lower for keyword in ['hacking', 'hack', 'bypass', 'technique', 'method', 'attack', 'penetration']):
-                            results = loop.run_until_complete(eden_ai.search_hacking_techniques(user_input, num_results=3))
-                            if results:
-                                enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - Hacking Techniques]:\n{eden_ai.format_search_results(results, 'hacking_techniques')}"
-                        # Check for general security research queries
-                        elif any(keyword in query_lower for keyword in ['security research', 'zero-day', '0-day', 'rce', 'sqli', 'xss', 'lfi', 'rfi', 'ssrf']):
-                            results = loop.run_until_complete(eden_ai.search_security_research(user_input, num_results=3))
-                            if results:
-                                enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - Security Research]:\n{eden_ai.format_search_results(results, 'security_research')}"
-                        # Check for code queries
-                        elif any(keyword in query_lower for keyword in ['code', 'example', 'implementation', 'tutorial']):
-                            results = loop.run_until_complete(eden_ai.search_code(user_input, num_results=3))
-                            if results:
-                                enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - Code Search]:\n{eden_ai.format_search_results(results, 'code')}"
-                        # Check for news queries
-                        elif any(keyword in query_lower for keyword in ['news', 'happening', 'update', 'breaking', 'recent']):
-                            results = loop.run_until_complete(eden_ai.get_current_news(user_input, num_results=3))
-                            if results:
-                                enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - News]:\n{eden_ai.format_search_results(results, 'news')}"
-                        # Default to web search
-                        else:
-                            results = loop.run_until_complete(eden_ai.search_web(user_input, num_results=3))
-                            if results:
-                                enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - Web Search]:\n{eden_ai.format_search_results(results, 'web')}"
+                            # Check for CVE queries
+                            if any(keyword in query_lower for keyword in ['cve', 'cve-', 'vulnerability', 'vuln']):
+                                # Extract CVE ID if present
+                                import re
+                                cve_match = re.search(r'CVE-\d{4}-\d{4,}', user_input, re.IGNORECASE)
+                                cve_id = cve_match.group(0).upper() if cve_match else None
+                                
+                                results = loop.run_until_complete(eden_ai.search_cve(cve_id=cve_id, query=user_input, num_results=3))
+                                if results:
+                                    enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - CVE Search]:\n{eden_ai.format_search_results(results, 'cve')}"
+                            # Check for POC queries
+                            elif any(keyword in query_lower for keyword in ['poc', 'proof of concept', 'exploit code', 'github poc']):
+                                # Extract CVE ID if present
+                                import re
+                                cve_match = re.search(r'CVE-\d{4}-\d{4,}', user_input, re.IGNORECASE)
+                                cve_id = cve_match.group(0).upper() if cve_match else None
+                                
+                                results = loop.run_until_complete(eden_ai.search_poc(user_input, cve_id=cve_id, num_results=3))
+                                if results:
+                                    enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - POC Search]:\n{eden_ai.format_search_results(results, 'poc')}"
+                            # Check for exploit queries
+                            elif any(keyword in query_lower for keyword in ['exploit', 'metasploit', 'exploit-db', 'working exploit']):
+                                results = loop.run_until_complete(eden_ai.search_exploit(user_input, num_results=3))
+                                if results:
+                                    enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - Exploit Search]:\n{eden_ai.format_search_results(results, 'exploit')}"
+                            # Check for hacking techniques queries
+                            elif any(keyword in query_lower for keyword in ['hacking', 'hack', 'bypass', 'technique', 'method', 'attack', 'penetration']):
+                                results = loop.run_until_complete(eden_ai.search_hacking_techniques(user_input, num_results=3))
+                                if results:
+                                    enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - Hacking Techniques]:\n{eden_ai.format_search_results(results, 'hacking_techniques')}"
+                            # Check for general security research queries
+                            elif any(keyword in query_lower for keyword in ['security research', 'zero-day', '0-day', 'rce', 'sqli', 'xss', 'lfi', 'rfi', 'ssrf']):
+                                results = loop.run_until_complete(eden_ai.search_security_research(user_input, num_results=3))
+                                if results:
+                                    enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - Security Research]:\n{eden_ai.format_search_results(results, 'security_research')}"
+                            # Check for code queries
+                            elif any(keyword in query_lower for keyword in ['code', 'example', 'implementation', 'tutorial']):
+                                results = loop.run_until_complete(eden_ai.search_code(user_input, num_results=3))
+                                if results:
+                                    enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - Code Search]:\n{eden_ai.format_search_results(results, 'code')}"
+                            # Check for news queries
+                            elif any(keyword in query_lower for keyword in ['news', 'happening', 'update', 'breaking', 'recent']):
+                                results = loop.run_until_complete(eden_ai.get_current_news(user_input, num_results=3))
+                                if results:
+                                    enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - News]:\n{eden_ai.format_search_results(results, 'news')}"
+                            # Default to web search
+                            else:
+                                results = loop.run_until_complete(eden_ai.search_web(user_input, num_results=3))
+                                if results:
+                                    enhanced_input = f"{user_input}\n\n[Current Information from Eden AI - Web Search]:\n{eden_ai.format_search_results(results, 'web')}"
                     except Exception as e:
                         logger.warning(f"Eden AI enhancement failed: {e}, using original input")
             except Exception as e:

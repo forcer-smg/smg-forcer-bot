@@ -4932,8 +4932,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data['current_project'] = current_project
                 logger.info(f"Restored current project: {current_project.get('project_name')}")
         
-        # Check for pending task
-        pending_task = continuous_exec.check_and_resume_task(user_id)
+        # Check for pending task (async function - need to await)
+        try:
+            pending_task = await continuous_exec.check_and_resume_task(user_id)
+        except Exception as e:
+            logger.warning(f"Error checking pending task: {e}")
+            pending_task = None
+        
         if pending_task:
             task_desc = pending_task.get('task_description', '')
             # If user is asking about their work, restore context
