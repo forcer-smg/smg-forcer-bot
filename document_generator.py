@@ -56,6 +56,23 @@ except ImportError:
     MARKDOWN_AVAILABLE = False
     logger.warning("markdown not available. Markdown conversion will be limited.")
 
+# Barcode and QR code generation
+try:
+    import qrcode
+    from qrcode.image.pil import PilImage
+    QRCODE_AVAILABLE = True
+except ImportError:
+    QRCODE_AVAILABLE = False
+    logger.warning("qrcode not available. QR code generation will be limited.")
+
+try:
+    import barcode
+    from barcode.writer import ImageWriter
+    BARCODE_AVAILABLE = True
+except ImportError:
+    BARCODE_AVAILABLE = False
+    logger.warning("python-barcode not available. Barcode generation will be limited.")
+
 
 class DocumentGenerator:
     """Generate PDF, Word, and Excel documents with formatting and templates"""
@@ -493,6 +510,302 @@ class DocumentGenerator:
             return json.loads(template_str)
         except:
             return template_str
+    
+    def generate_qr_code(self,
+                        data: str,
+                        filename: str = None,
+                        size: int = 10,
+                        border: int = 4,
+                        error_correction: str = 'M',
+                        box_size: int = 10) -> Optional[str]:
+        """
+        Generate QR code image
+        
+        Args:
+            data: Data to encode in QR code
+            filename: Output filename (auto-generated if None)
+            size: QR code size (box_size * size)
+            border: Border size in boxes
+            error_correction: Error correction level ('L', 'M', 'Q', 'H')
+            box_size: Size of each box in pixels
+        
+        Returns:
+            Path to generated QR code image or None if failed
+        """
+        if not self.qrcode_available:
+            logger.error("qrcode not available for QR code generation")
+            return None
+        
+        try:
+            # Generate filename if not provided
+            if not filename:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_data = "".join(c for c in data[:20] if c.isalnum() or c in (' ', '-', '_')).strip()
+                safe_data = safe_data.replace(' ', '_')
+                filename = f"qrcode_{safe_data}_{timestamp}.png"
+            
+            if not filename.endswith(('.png', '.jpg', '.jpeg')):
+                filename += '.png'
+            
+            filepath = self.output_dir / filename
+            
+            # Create QR code
+            qr = qrcode.QRCode(
+                version=1,
+                error_correction=getattr(qrcode.constants.ERROR_CORRECT, error_correction.upper(), qrcode.constants.ERROR_CORRECT_M),
+                box_size=box_size,
+                border=border,
+            )
+            qr.add_data(data)
+            qr.make(fit=True)
+            
+            # Create image
+            img = qr.make_image(fill_color="black", back_color="white")
+            
+            # Resize if needed
+            if size != box_size:
+                from PIL import Image
+                img = img.resize((size * box_size, size * box_size), Image.Resampling.LANCZOS)
+            
+            # Save image
+            img.save(str(filepath))
+            
+            logger.info(f"QR code generated: {filepath}")
+            return str(filepath)
+            
+        except Exception as e:
+            logger.error(f"Error generating QR code: {e}", exc_info=True)
+            return None
+    
+    def generate_barcode(self,
+                         data: str,
+                         barcode_type: str = 'code128',
+                         filename: str = None,
+                         writer_options: Dict = None) -> Optional[str]:
+        """
+        Generate barcode image
+        
+        Args:
+            data: Data to encode in barcode
+            barcode_type: Barcode type ('ean13', 'ean8', 'code128', 'code39', 'upc', etc.)
+            filename: Output filename (auto-generated if None)
+            writer_options: Additional options for barcode writer
+        
+        Returns:
+            Path to generated barcode image or None if failed
+        """
+        if not self.barcode_available:
+            logger.error("python-barcode not available for barcode generation")
+            return None
+        
+        try:
+            # Get barcode class
+            try:
+                barcode_class = barcode.get_barcode_class(barcode_type)
+            except Exception as e:
+                logger.error(f"Invalid barcode type {barcode_type}: {e}")
+                # Default to code128
+                barcode_class = barcode.get_barcode_class('code128')
+            
+            # Generate filename if not provided
+            if not filename:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_data = "".join(c for c in data[:20] if c.isalnum() or c in (' ', '-', '_')).strip()
+                safe_data = safe_data.replace(' ', '_')
+                filename = f"barcode_{barcode_type}_{safe_data}_{timestamp}.png"
+            
+            if not filename.endswith(('.png', '.jpg', '.jpeg', '.svg')):
+                filename += '.png'
+            
+            filepath = self.output_dir / filename
+            
+            # Create barcode
+            code = barcode_class(data, writer=ImageWriter())
+            
+            # Default writer options
+            default_options = {
+                'module_width': 0.5,
+                'module_height': 15.0,
+                'quiet_zone': 6.5,
+                'font_size': 10,
+                'text_distance': 5.0,
+                'background': 'white',
+                'foreground': 'black',
+            }
+            
+            # Merge with user options
+            options = {**default_options, **(writer_options or {})}
+            
+            # Save barcode
+            code.save(str(filepath).replace('.png', '').replace('.jpg', '').replace('.jpeg', '').replace('.svg', ''), options)
+            
+            # Get actual saved file (barcode library may add extension)
+            saved_files = list(self.output_dir.glob(f"{Path(filepath).stem}*"))
+            if saved_files:
+                filepath = saved_files[0]
+            
+            logger.info(f"Barcode generated: {filepath}")
+            return str(filepath)
+            
+        except Exception as e:
+            logger.error(f"Error generating barcode: {e}", exc_info=True)
+            return None
+    
+    def add_qr_code_to_pdf(self,
+                          pdf_path: str,
+                          qr_data: str,
+                          position: Tuple[float, float] = None,
+                          size: float = 1.0) -> Optional[str]:
+        """
+        Add QR code to existing PDF document
+        
+        Args:
+            pdf_path: Path to PDF file
+            qr_data: Data to encode in QR code
+            position: (x, y) position in inches (None = bottom right)
+            size: QR code size in inches
+        
+        Returns:
+            Path to modified PDF or None if failed
+        """
+        if not self.pdf_available or not self.qrcode_available:
+            logger.error("PDF or QR code generation not available")
+            return None
+        
+        try:
+            from reportlab.pdfgen import canvas
+            from reportlab.lib.pagesizes import letter
+            from PyPDF2 import PdfReader, PdfWriter
+            import io
+            
+            # Generate QR code
+            qr_path = self.generate_qr_code(qr_data, size=int(size * 72))  # Convert inches to points
+            if not qr_path:
+                return None
+            
+            # Read existing PDF
+            reader = PdfReader(pdf_path)
+            writer = PdfWriter()
+            
+            # Add QR code to each page
+            for page_num, page in enumerate(reader.pages):
+                # Create overlay with QR code
+                packet = io.BytesIO()
+                can = canvas.Canvas(packet, pagesize=letter)
+                
+                # Calculate position
+                if position is None:
+                    # Bottom right
+                    x = letter[0] - (size * 72) - 20
+                    y = 20
+                else:
+                    x = position[0] * 72
+                    y = position[1] * 72
+                
+                # Draw QR code
+                can.drawImage(qr_path, x, y, width=size * 72, height=size * 72)
+                can.save()
+                
+                # Merge overlay
+                packet.seek(0)
+                overlay = PdfReader(packet)
+                page.merge_page(overlay.pages[0])
+                writer.add_page(page)
+            
+            # Save modified PDF
+            output_path = Path(pdf_path).parent / f"{Path(pdf_path).stem}_with_qr.pdf"
+            with open(output_path, 'wb') as f:
+                writer.write(f)
+            
+            # Clean up temp QR code
+            if Path(qr_path).exists():
+                Path(qr_path).unlink()
+            
+            logger.info(f"QR code added to PDF: {output_path}")
+            return str(output_path)
+            
+        except Exception as e:
+            logger.error(f"Error adding QR code to PDF: {e}", exc_info=True)
+            return None
+    
+    def add_barcode_to_pdf(self,
+                          pdf_path: str,
+                          barcode_data: str,
+                          barcode_type: str = 'code128',
+                          position: Tuple[float, float] = None,
+                          size: Tuple[float, float] = (3.0, 1.0)) -> Optional[str]:
+        """
+        Add barcode to existing PDF document
+        
+        Args:
+            pdf_path: Path to PDF file
+            barcode_data: Data to encode in barcode
+            barcode_type: Barcode type
+            position: (x, y) position in inches (None = bottom right)
+            size: (width, height) in inches
+        
+        Returns:
+            Path to modified PDF or None if failed
+        """
+        if not self.pdf_available or not self.barcode_available:
+            logger.error("PDF or barcode generation not available")
+            return None
+        
+        try:
+            from reportlab.pdfgen import canvas
+            from reportlab.lib.pagesizes import letter
+            from PyPDF2 import PdfReader, PdfWriter
+            import io
+            
+            # Generate barcode
+            barcode_path = self.generate_barcode(barcode_data, barcode_type)
+            if not barcode_path:
+                return None
+            
+            # Read existing PDF
+            reader = PdfReader(pdf_path)
+            writer = PdfWriter()
+            
+            # Add barcode to each page
+            for page_num, page in enumerate(reader.pages):
+                # Create overlay with barcode
+                packet = io.BytesIO()
+                can = canvas.Canvas(packet, pagesize=letter)
+                
+                # Calculate position
+                if position is None:
+                    # Bottom right
+                    x = letter[0] - (size[0] * 72) - 20
+                    y = 20
+                else:
+                    x = position[0] * 72
+                    y = position[1] * 72
+                
+                # Draw barcode
+                can.drawImage(barcode_path, x, y, width=size[0] * 72, height=size[1] * 72)
+                can.save()
+                
+                # Merge overlay
+                packet.seek(0)
+                overlay = PdfReader(packet)
+                page.merge_page(overlay.pages[0])
+                writer.add_page(page)
+            
+            # Save modified PDF
+            output_path = Path(pdf_path).parent / f"{Path(pdf_path).stem}_with_barcode.pdf"
+            with open(output_path, 'wb') as f:
+                writer.write(f)
+            
+            # Clean up temp barcode
+            if Path(barcode_path).exists():
+                Path(barcode_path).unlink()
+            
+            logger.info(f"Barcode added to PDF: {output_path}")
+            return str(output_path)
+            
+        except Exception as e:
+            logger.error(f"Error adding barcode to PDF: {e}", exc_info=True)
+            return None
 
 
 # Global instance

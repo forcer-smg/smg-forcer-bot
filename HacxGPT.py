@@ -371,6 +371,9 @@ DOCUMENT GENERATION:
 - Generate Excel (.xlsx) spreadsheets with data
 - Save and reuse document templates from database
 - Use template placeholders for dynamic content
+- Generate QR codes (text, URLs, data)
+- Generate barcodes (code128, code39, ean13, ean8, upc, isbn, etc.)
+- Add QR codes and barcodes to PDF documents
 
 IMAGE GENERATION:
 - Generate images from text prompts using Pollinations.AI (free, no API key)

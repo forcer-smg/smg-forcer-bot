@@ -3190,6 +3190,76 @@ async def generate_excel_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 
+async def generate_qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /generate_qr command"""
+    data = ' '.join(context.args) if context.args else None
+    
+    if not data:
+        await update.message.reply_text(
+            "📱 *QR Code Generator*\n\n"
+            "Usage: `/generate_qr [data]`\n\n"
+            "Example: `/generate_qr https://example.com`\n"
+            "Example: `/generate_qr Hello World`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        from document_generator import get_document_generator
+        
+        await update.message.reply_text("📱 Generating QR code...")
+        
+        doc_gen = get_document_generator()
+        filepath = doc_gen.generate_qr_code(data)
+        
+        if filepath:
+            with open(filepath, 'rb') as f:
+                await update.message.reply_photo(photo=f, caption=f"📱 QR Code: `{data[:50]}`", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("❌ Failed to generate QR code")
+            
+    except Exception as e:
+        logger.error(f"Error generating QR code: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def generate_barcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /generate_barcode command"""
+    args = context.args
+    
+    if not args or len(args) < 1:
+        await update.message.reply_text(
+            "📊 *Barcode Generator*\n\n"
+            "Usage: `/generate_barcode [data] [type]`\n\n"
+            "Types: `code128`, `code39`, `ean13`, `ean8`, `upc`, `isbn10`, `isbn13`\n\n"
+            "Example: `/generate_barcode 1234567890 code128`\n"
+            "Example: `/generate_barcode 9781234567890 isbn13`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        from document_generator import get_document_generator
+        
+        data = args[0]
+        barcode_type = args[1] if len(args) > 1 else 'code128'
+        
+        await update.message.reply_text(f"📊 Generating {barcode_type} barcode...")
+        
+        doc_gen = get_document_generator()
+        filepath = doc_gen.generate_barcode(data, barcode_type=barcode_type)
+        
+        if filepath:
+            with open(filepath, 'rb') as f:
+                await update.message.reply_photo(photo=f, caption=f"📊 Barcode ({barcode_type}): `{data}`", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("❌ Failed to generate barcode")
+            
+    except Exception as e:
+        logger.error(f"Error generating barcode: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
 # ==================== Template Management Commands ====================
 
 async def save_template_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5139,6 +5209,10 @@ def main():
     application.add_handler(CommandHandler("generate_pdf", generate_pdf_command))
     application.add_handler(CommandHandler("generate_word", generate_word_command))
     application.add_handler(CommandHandler("generate_excel", generate_excel_command))
+    
+    # Barcode and QR code commands
+    application.add_handler(CommandHandler("generate_qr", generate_qr_command))
+    application.add_handler(CommandHandler("generate_barcode", generate_barcode_command))
     
     # Template management commands
     application.add_handler(CommandHandler("save_template", save_template_command))
