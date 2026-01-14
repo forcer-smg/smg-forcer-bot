@@ -86,8 +86,10 @@ class DocumentGenerator:
         self.docx_available = DOCX_AVAILABLE
         self.xlsx_available = OPENPYXL_AVAILABLE
         self.markdown_available = MARKDOWN_AVAILABLE
+        self.qrcode_available = QRCODE_AVAILABLE
+        self.barcode_available = BARCODE_AVAILABLE
         
-        logger.info(f"Document Generator initialized - PDF: {self.pdf_available}, Word: {self.docx_available}, Excel: {self.xlsx_available}")
+        logger.info(f"Document Generator initialized - PDF: {self.pdf_available}, Word: {self.docx_available}, Excel: {self.xlsx_available}, QR: {self.qrcode_available}, Barcode: {self.barcode_available}")
     
     def generate_pdf(self, 
                      content: Union[str, Dict],
