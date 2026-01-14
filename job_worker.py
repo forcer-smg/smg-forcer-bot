@@ -281,16 +281,55 @@ class JobWorker:
                         from command_executor import get_command_executor
                         executor = get_command_executor(workspace_path)
                         
-                        for cmd_info in parsed['commands']:
-                            cmd = cmd_info.get('command', '')
-                            if cmd:
-                                result = executor.execute_command(cmd, cwd=workspace_path)
-                                if result.get('success'):
-                                    logger.info(f"Command executed: {cmd[:50]}...")
-                                else:
-                                    logger.warning(f"Command failed: {cmd[:50]}...")
+                        execution_results = []
+                        for i, cmd_info in enumerate(parsed['commands'], 1):
+                            # Handle both dict and string formats
+                            if isinstance(cmd_info, dict):
+                                cmd = cmd_info.get('command', '')
+                            else:
+                                cmd = str(cmd_info).strip()
+                            
+                            if not cmd:
+                                continue
+                            
+                            logger.info(f"Executing command {i}/{len(parsed['commands'])}: {cmd[:100]}")
+                            
+                            # Execute command
+                            result = executor.execute_command(
+                                cmd, 
+                                cwd=workspace_path,
+                                timeout=300,
+                                verify=True
+                            )
+                            
+                            execution_results.append(result)
+                            
+                            # Log detailed results
+                            if result.get('success'):
+                                logger.info(f"✅ Command {i} SUCCESS: {cmd[:50]}... (exit_code: {result.get('exit_code')}, verified: {result.get('verified')})")
+                                if result.get('stdout'):
+                                    logger.debug(f"   Stdout: {result.get('stdout')[:200]}")
+                            else:
+                                logger.warning(f"❌ Command {i} FAILED: {cmd[:50]}... (exit_code: {result.get('exit_code')}, error: {result.get('error', 'N/A')})")
+                                if result.get('stderr'):
+                                    logger.warning(f"   Stderr: {result.get('stderr')[:200]}")
+                            
+                            # Add execution results to job data for AI feedback
+                            if 'execution_results' not in job_data:
+                                job_data['execution_results'] = []
+                            job_data['execution_results'].append({
+                                'command': cmd,
+                                'success': result.get('success'),
+                                'exit_code': result.get('exit_code'),
+                                'stdout': result.get('stdout', '')[:500],  # Limit size
+                                'stderr': result.get('stderr', '')[:500],
+                                'verified': result.get('verified')
+                            })
+                        
+                        logger.info(f"Executed {len(execution_results)} commands: {sum(1 for r in execution_results if r.get('success'))} succeeded")
+                        
                     except Exception as e:
-                        logger.error(f"Error executing commands: {e}")
+                        logger.error(f"Error executing commands: {e}", exc_info=True)
                 
                 # Update job data
                 job_data['last_response'] = response_text
