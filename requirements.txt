@@ -34,3 +34,6 @@ rarfile>=4.1
 psd-tools>=1.9.0
 # MEGA.nz download support
 mega.py>=1.0.8
+# Local OCR libraries (FREE, no API key needed!)
+pytesseract>=0.3.10
+easyocr>=1.7.0

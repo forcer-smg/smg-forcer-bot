@@ -28,19 +28,27 @@ class VisionProcessor:
     
     def __init__(self, huggingface_key: Optional[str] = None, openrouter_key: Optional[str] = None,
                  google_api_key: Optional[str] = None, replicate_api_key: Optional[str] = None,
-                 ocr_space_key: Optional[str] = None, pixlab_key: Optional[str] = None):
+                 ocr_space_key: Optional[str] = None, mindee_key: Optional[str] = None,
+                 elysia_key: Optional[str] = None):
         self.huggingface_key = huggingface_key or os.getenv('HUGGINGFACE_API_KEY')
         self.openrouter_key = openrouter_key or os.getenv('OPENROUTER_API_KEY')
         self.google_api_key = google_api_key or os.getenv('GOOGLE_API_KEY') or os.getenv('GOOGLE_GEMINI_API_KEY')
         self.replicate_api_key = replicate_api_key or os.getenv('REPLICATE_API_KEY')
         self.ocr_space_key = ocr_space_key or os.getenv('OCR_SPACE_API_KEY')  # Optional, has free tier without key
-        self.pixlab_key = pixlab_key or os.getenv('PIXLAB_API_KEY')  # Optional, has free tier without key
+        self.mindee_key = mindee_key or os.getenv('MINDEE_API_KEY')  # FREE: 250 IDs/month
+        self.elysia_key = elysia_key or os.getenv('ELYSIA_API_KEY')  # FREE API available
         
         self.hf_available = bool(self.huggingface_key)
         self.or_available = bool(self.openrouter_key)
         self.google_available = bool(self.google_api_key)
         self.replicate_available = bool(self.replicate_api_key)
-        # OCR.space and PixLab work without keys (free tier)
+        self.mindee_available = bool(self.mindee_key)
+        self.elysia_available = bool(self.elysia_key)
+        # OCR.space works without keys (free tier)
+        
+        # Check for local OCR libraries
+        self.tesseract_available = self._check_tesseract()
+        self.easyocr_available = self._check_easyocr()
         
         # Hugging Face models
         self.hf_models = {
@@ -48,6 +56,24 @@ class VisionProcessor:
             'vqa': 'dandelin/vilt-b32-finetuned-vqa',
             'clip': 'openai/clip-vit-base-patch32'
         }
+    
+    def _check_tesseract(self) -> bool:
+        """Check if Tesseract OCR is available (local, free)"""
+        try:
+            import pytesseract
+            # Try to get version
+            pytesseract.get_tesseract_version()
+            return True
+        except:
+            return False
+    
+    def _check_easyocr(self) -> bool:
+        """Check if EasyOCR is available (local, free)"""
+        try:
+            import easyocr
+            return True
+        except:
+            return False
     
     def process_image_huggingface(self, image_data: Union[bytes, str, Path], 
                                    task: str = 'caption') -> Dict:
@@ -378,6 +404,226 @@ class VisionProcessor:
                 'error': str(e)
             }
     
+    def process_image_mindee(self, image_data: Union[bytes, str, Path]) -> Dict:
+        """
+        Process ID document using Mindee API (FREE: 250 IDs/month, no credit card)
+        Perfect for ID scanning and data extraction
+        Get API key: https://mindee.com/product/international-id-ocr-api
+        """
+        if not self.mindee_available:
+            raise ValueError("Mindee API key not configured")
+        
+        # Prepare image
+        image_bytes = self._prepare_image(image_data)
+        if not image_bytes:
+            raise ValueError("Failed to prepare image data")
+        
+        # Mindee API endpoint for International ID OCR
+        api_url = "https://api.mindee.net/v1/products/mindee/international_id/v1/predict"
+        
+        headers = {
+            "Authorization": f"Token {self.mindee_key}"
+        }
+        
+        files = {
+            'document': ('id.jpg', image_bytes, 'image/jpeg')
+        }
+        
+        try:
+            response = requests.post(api_url, headers=headers, files=files, timeout=30)
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            if result.get('api_request', {}).get('status') == 'success':
+                # Extract ID fields
+                prediction = result.get('document', {}).get('inference', {}).get('prediction', {})
+                
+                extracted_data = {
+                    'name': prediction.get('given_names', []) + prediction.get('surnames', []),
+                    'date_of_birth': prediction.get('birth_date'),
+                    'document_number': prediction.get('id_number'),
+                    'document_type': prediction.get('document_type'),
+                    'nationality': prediction.get('nationality'),
+                    'gender': prediction.get('gender'),
+                    'address': prediction.get('address'),
+                    'expiry_date': prediction.get('expiry_date'),
+                    'issuing_country': prediction.get('issuing_country')
+                }
+                
+                return {
+                    'success': True,
+                    'provider': 'mindee',
+                    'result': extracted_data,
+                    'raw': result
+                }
+            else:
+                return {
+                    'success': False,
+                    'provider': 'mindee',
+                    'error': result.get('api_request', {}).get('error', {}).get('message', 'Unknown error')
+                }
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Mindee API error: {e}")
+            return {
+                'success': False,
+                'provider': 'mindee',
+                'error': str(e)
+            }
+    
+    def process_image_elysia(self, image_data: Union[bytes, str, Path]) -> Dict:
+        """
+        Process ID card using Elysia Tools API (FREE API available)
+        Extracts ID card data to JSON format
+        Get API key: https://elysiatools.com/en/tools/ai-ocr-id-card-to-json
+        """
+        if not self.elysia_available:
+            raise ValueError("Elysia API key not configured")
+        
+        # Prepare image
+        image_bytes = self._prepare_image(image_data)
+        if not image_bytes:
+            raise ValueError("Failed to prepare image data")
+        
+        # Convert to base64
+        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # Elysia API endpoint
+        api_url = "https://api.elysiatools.com/v1/ocr/id-card"
+        
+        headers = {
+            "Authorization": f"Bearer {self.elysia_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "image": image_base64,
+            "format": "json"
+        }
+        
+        try:
+            response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            if result.get('success'):
+                return {
+                    'success': True,
+                    'provider': 'elysia',
+                    'result': result.get('data', result),
+                    'raw': result
+                }
+            else:
+                return {
+                    'success': False,
+                    'provider': 'elysia',
+                    'error': result.get('error', 'Unknown error')
+                }
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Elysia API error: {e}")
+            return {
+                'success': False,
+                'provider': 'elysia',
+                'error': str(e)
+            }
+    
+    def process_image_tesseract(self, image_data: Union[bytes, str, Path]) -> Dict:
+        """
+        Extract text from image using Tesseract OCR (LOCAL, FREE, no API key needed)
+        Requires: pip install pytesseract
+        System: apt-get install tesseract-ocr (Linux) or brew install tesseract (Mac)
+        """
+        if not self.tesseract_available:
+            raise ValueError("Tesseract OCR not installed")
+        
+        try:
+            import pytesseract
+            from PIL import Image
+            
+            # Load image
+            if isinstance(image_data, bytes):
+                img = Image.open(io.BytesIO(image_data))
+            elif isinstance(image_data, (str, Path)):
+                img = Image.open(image_data)
+            else:
+                img = image_data
+            
+            # Extract text
+            text = pytesseract.image_to_string(img)
+            
+            # Try to extract structured data (for IDs)
+            data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+            
+            return {
+                'success': True,
+                'provider': 'tesseract',
+                'result': text.strip(),
+                'structured_data': data,
+                'raw': {'text': text, 'data': data}
+            }
+            
+        except Exception as e:
+            logger.error(f"Tesseract OCR error: {e}")
+            return {
+                'success': False,
+                'provider': 'tesseract',
+                'error': str(e)
+            }
+    
+    def process_image_easyocr(self, image_data: Union[bytes, str, Path]) -> Dict:
+        """
+        Extract text from image using EasyOCR (LOCAL, FREE, no API key needed)
+        Requires: pip install easyocr
+        First run downloads models (~500MB), then works offline
+        """
+        if not self.easyocr_available:
+            raise ValueError("EasyOCR not installed")
+        
+        try:
+            import easyocr
+            import numpy as np
+            from PIL import Image
+            
+            # Initialize reader (first time downloads models)
+            reader = easyocr.Reader(['en'], gpu=False)  # Use GPU if available
+            
+            # Load image
+            if isinstance(image_data, bytes):
+                img = Image.open(io.BytesIO(image_data))
+            elif isinstance(image_data, (str, Path)):
+                img = Image.open(image_data)
+            else:
+                img = image_data
+            
+            # Convert to numpy array
+            img_array = np.array(img)
+            
+            # Extract text
+            results = reader.readtext(img_array)
+            
+            # Format results
+            text_lines = [result[1] for result in results]
+            full_text = '\n'.join(text_lines)
+            
+            return {
+                'success': True,
+                'provider': 'easyocr',
+                'result': full_text,
+                'detailed_results': results,
+                'raw': {'text': full_text, 'results': results}
+            }
+            
+        except Exception as e:
+            logger.error(f"EasyOCR error: {e}")
+            return {
+                'success': False,
+                'provider': 'easyocr',
+                'error': str(e)
+            }
+    
     def process_image_pixlab(self, image_data: Union[bytes, str, Path], 
                             task: str = 'docscan') -> Dict:
         """
@@ -447,7 +693,41 @@ class VisionProcessor:
         """
         # Auto-select best provider based on availability
         if prefer_provider == 'auto':
-            # Try free providers first
+            # Try free ID scanning APIs first (best for ID generation)
+            if self.mindee_available and task in ['docscan', 'id', 'caption']:
+                try:
+                    result = self.process_image_mindee(image_data)
+                    if result.get('success'):
+                        return result
+                except Exception as e:
+                    logger.warning(f"Mindee failed: {e}")
+            
+            if self.elysia_available and task in ['docscan', 'id', 'caption']:
+                try:
+                    result = self.process_image_elysia(image_data)
+                    if result.get('success'):
+                        return result
+                except Exception as e:
+                    logger.warning(f"Elysia failed: {e}")
+            
+            # Try local OCR (free, no API key)
+            if self.easyocr_available:
+                try:
+                    result = self.process_image_easyocr(image_data)
+                    if result.get('success'):
+                        return result
+                except Exception as e:
+                    logger.warning(f"EasyOCR failed: {e}")
+            
+            if self.tesseract_available:
+                try:
+                    result = self.process_image_tesseract(image_data)
+                    if result.get('success'):
+                        return result
+                except Exception as e:
+                    logger.warning(f"Tesseract failed: {e}")
+            
+            # Try free vision providers
             if self.google_available:
                 try:
                     result = self.process_image_google_gemini(
@@ -500,7 +780,15 @@ class VisionProcessor:
                 logger.warning(f"OCR.space failed: {e}")
         else:
             # Use specified provider
-            if prefer_provider == 'google' and self.google_available:
+            if prefer_provider == 'mindee' and self.mindee_available:
+                return self.process_image_mindee(image_data)
+            elif prefer_provider == 'elysia' and self.elysia_available:
+                return self.process_image_elysia(image_data)
+            elif prefer_provider == 'easyocr' and self.easyocr_available:
+                return self.process_image_easyocr(image_data)
+            elif prefer_provider == 'tesseract' and self.tesseract_available:
+                return self.process_image_tesseract(image_data)
+            elif prefer_provider == 'google' and self.google_available:
                 return self.process_image_google_gemini(image_data, prompt or "Describe this image in detail.")
             elif prefer_provider == 'replicate' and self.replicate_available:
                 return self.process_image_replicate(image_data, prompt or "What is in this image?")
@@ -599,7 +887,8 @@ _processor_instance = None
 
 def get_vision_processor(hf_key: Optional[str] = None, or_key: Optional[str] = None,
                         google_key: Optional[str] = None, replicate_key: Optional[str] = None,
-                        ocr_key: Optional[str] = None, pixlab_key: Optional[str] = None) -> VisionProcessor:
+                        ocr_key: Optional[str] = None, mindee_key: Optional[str] = None,
+                        elysia_key: Optional[str] = None) -> VisionProcessor:
     """Get or create global vision processor instance"""
     global _processor_instance
     if _processor_instance is None:
@@ -609,6 +898,7 @@ def get_vision_processor(hf_key: Optional[str] = None, or_key: Optional[str] = N
             google_api_key=google_key,
             replicate_api_key=replicate_key,
             ocr_space_key=ocr_key,
-            pixlab_key=pixlab_key
+            mindee_key=mindee_key,
+            elysia_key=elysia_key
         )
     return _processor_instance
