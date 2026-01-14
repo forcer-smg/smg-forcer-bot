@@ -3430,12 +3430,42 @@ async def download_template_command(update: Update, context: ContextTypes.DEFAUL
         
         downloader = get_template_downloader()
         
+        # Determine source and download
         if 'mediafire.com' in url.lower():
             file_path = downloader.download_from_mediafire(url, template_name)
+        elif 'mega.nz' in url.lower():
+            file_path = downloader.download_from_mega(url, template_name)
         else:
-            # Direct URL download
-            await update.message.reply_text("❌ Direct URL downloads not yet implemented. Use MediaFire links.")
-            return
+            # Direct URL download (basic support)
+            await update.message.reply_text("📥 Downloading from direct URL...")
+            try:
+                import requests
+                response = requests.get(url, stream=True, timeout=300)
+                response.raise_for_status()
+                
+                if not template_name:
+                    # Extract filename from URL or Content-Disposition
+                    content_disposition = response.headers.get('Content-Disposition', '')
+                    if 'filename=' in content_disposition:
+                        template_name = content_disposition.split('filename=')[1].strip('"\'')
+                    else:
+                        template_name = url.split('/')[-1].split('?')[0] or f"template_{int(time.time())}"
+                
+                file_ext = Path(template_name).suffix.lower()
+                if file_ext == '.psd':
+                    save_path = downloader.psd_dir / template_name
+                else:
+                    save_path = downloader.templates_dir / template_name
+                
+                with open(save_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                
+                file_path = str(save_path)
+            except Exception as e:
+                logger.error(f"Error downloading from URL: {e}")
+                await update.message.reply_text(f"❌ Failed to download from URL: {str(e)}")
+                return
         
         if file_path:
             # Save to template database
@@ -3443,21 +3473,33 @@ async def download_template_command(update: Update, context: ContextTypes.DEFAUL
             template_mgr = get_template_manager(db)
             
             # Determine template type from file extension
-            file_ext = Path(file_path).suffix.lower()
+            file_ext = Path(file_path).suffix.lower() if file_path else None
             if file_ext == '.psd':
                 template_type = 'psd'
             elif file_ext == '.pdf':
                 template_type = 'pdf'
+            elif file_ext in ['.rar', '.zip']:
+                template_type = 'archive'
             else:
                 template_type = 'other'
             
+            # Determine source
+            if 'mediafire.com' in url.lower():
+                source = 'mediafire'
+            elif 'mega.nz' in url.lower():
+                source = 'mega'
+            else:
+                source = 'direct'
+            
             template_id = template_mgr.save_template(
                 user_id=user_id,
-                name=template_name or Path(file_path).stem,
+                name=template_name or (Path(file_path).stem if file_path else f"template_{int(time.time())}"),
                 template_type=template_type,
-                template_data={'file_path': file_path, 'source_url': url},
+                template_data={'file_path': file_path, 'source_url': url, 'source': source},
                 category='downloaded',
-                description=f"Downloaded from {url}"
+                description=f"Downloaded from {source}",
+                source_url=url,
+                file_path=file_path
             )
             
             if template_id:

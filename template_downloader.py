@@ -22,6 +22,14 @@ except ImportError:
     PILLOW_AVAILABLE = False
     logger.warning("Pillow not available. PSD template processing will be limited.")
 
+# MEGA.nz support
+try:
+    from mega import Mega
+    MEGA_AVAILABLE = True
+except ImportError:
+    MEGA_AVAILABLE = False
+    logger.warning("mega.py not available. MEGA.nz downloads will be limited.")
+
 
 class TemplateDownloader:
     """Download and process template files"""
