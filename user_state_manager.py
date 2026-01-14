@@ -139,7 +139,13 @@ class UserStateManager:
             conn.close()
             
             if row and row[0]:
-                state_value = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                try:
+                    state_value = json.loads(row[0]) if isinstance(row[0], str) and row[0].strip() else row[0]
+                except json.JSONDecodeError:
+                    # Handle empty or invalid JSON
+                    logger.warning(f"Invalid JSON in state for {state_key}: {row[0]}")
+                    state_value = row[0] if not isinstance(row[0], str) or row[0].strip() else {}
+                
                 return {
                     'value': state_value,
                     'workspace_path': row[1],
@@ -180,7 +186,18 @@ class UserStateManager:
             state = {}
             for row in rows:
                 state_key = row[0]
-                state_value = json.loads(row[1]) if isinstance(row[1], str) else row[1]
+                try:
+                    if isinstance(row[1], str) and row[1].strip():
+                        state_value = json.loads(row[1])
+                    elif isinstance(row[1], str):
+                        # Empty string
+                        state_value = {}
+                    else:
+                        state_value = row[1]
+                except json.JSONDecodeError:
+                    logger.warning(f"Invalid JSON in state for {state_key}: {row[1]}")
+                    state_value = {} if isinstance(row[1], str) and not row[1].strip() else row[1]
+                
                 state[state_key] = {
                     'value': state_value,
                     'workspace_path': row[2],

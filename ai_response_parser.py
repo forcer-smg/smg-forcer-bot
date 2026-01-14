@@ -140,13 +140,64 @@ class AIResponseParser:
         
         # Check if Python code block contains shell commands (like "cd /app && python -c")
         # If so, treat as shell command instead
-        if language == 'python' and ('cd ' in code_content or 'python -c' in code_content or 'python3 -c' in code_content or '&&' in code_content):
+        # BUT: If it's a multi-line Python script (has imports, def, class, etc.), keep it as Python
+        is_python_script = any(keyword in code_content for keyword in ['import ', 'from ', 'def ', 'class ', 'if __name__'])
+        if language == 'python' and not is_python_script and ('cd ' in code_content or 'python -c' in code_content or 'python3 -c' in code_content or '&&' in code_content):
             logger.info("Python code block contains shell commands, treating as shell")
             language = 'bash'
         
         if language in ['bash', 'sh', 'shell', 'zsh']:
             # For shell scripts, handle multi-line commands properly
+            # First, check if this is a multi-line script that should be executed as a whole
             lines = code_content.split('\n')
+            
+            # Check if this contains multi-line constructs (if/for/while blocks)
+            has_multiline_construct = False
+            open_constructs = 0
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith('#'):
+                    continue
+                # Count opening constructs
+                if re.search(r'\bif\s+\[', stripped) or re.search(r'\bif\s+\[', stripped) or stripped.startswith('if '):
+                    open_constructs += 1
+                if stripped.startswith('for ') or stripped.startswith('while '):
+                    open_constructs += 1
+                # Count closing constructs
+                if stripped == 'fi' or stripped == 'done' or stripped == 'esac':
+                    open_constructs -= 1
+            
+            # If we have unclosed constructs, treat as single script
+            if open_constructs > 0:
+                has_multiline_construct = True
+            
+            # If it's a multi-line script, execute as a whole
+            if has_multiline_construct or len([l for l in lines if l.strip() and not l.strip().startswith('#')]) > 5:
+                # Write entire script to temp file and execute
+                import tempfile
+                import os
+                import sys
+                try:
+                    if sys.platform == 'linux' or sys.platform.startswith('linux'):
+                        temp_dir = '/tmp'
+                    else:
+                        temp_dir = tempfile.gettempdir()
+                    
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False, dir=temp_dir) as f:
+                        f.write('#!/bin/bash\n')
+                        f.write(code_content)
+                        temp_file = f.name
+                        if sys.platform == 'linux' or sys.platform.startswith('linux'):
+                            os.chmod(temp_file, 0o755)
+                    
+                    commands.append(f"bash {temp_file}")
+                    logger.info(f"Created bash temp script: {temp_file}")
+                    return commands
+                except Exception as e:
+                    logger.error(f"Error creating bash temp file: {e}", exc_info=True)
+                    # Fall through to line-by-line parsing
+            
+            # Otherwise, parse line by line
             current_command = []
             
             for line in lines:
@@ -166,12 +217,17 @@ class AIResponseParser:
                     current_command.append(line.rstrip('\\').strip())
                     continue
                 
-                # Handle python -c with multi-line strings
+                # Handle python -c with multi-line strings - detect if it spans multiple lines
                 if 'python' in line and '-c' in line and '"' in line:
-                    # Extract Python code from python -c "..."
-                    # This is a shell command that contains Python code
-                    commands.append(line)
-                    continue
+                    # Check if this is the start of a multi-line python -c command
+                    quote_count = line.count('"') - line.count('\\"')
+                    if quote_count % 2 == 1:  # Unclosed quote - multi-line
+                        current_command.append(line)
+                        continue
+                    else:
+                        # Single line python -c command
+                        commands.append(line)
+                        continue
                 
                 # Add to current command or start new one
                 if current_command:
