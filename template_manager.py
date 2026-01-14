@@ -76,13 +76,22 @@ class TemplateManager:
                 existing = cursor.fetchone()
                 
                 if existing:
+                    # Add source_url and file_path to template_data if provided
+                    if source_url or file_path:
+                        if not isinstance(template_data, dict):
+                            template_data = {}
+                        if source_url:
+                            template_data['source_url'] = source_url
+                        if file_path:
+                            template_data['file_path'] = file_path
+                    
                     # Update existing template
                     cursor.execute("""
                         UPDATE document_templates 
                         SET template_data = %s, type = %s, category = %s, 
-                            description = %s, updated_at = CURRENT_TIMESTAMP
+                            description = %s, file_path = %s, updated_at = CURRENT_TIMESTAMP
                         WHERE id = %s
-                    """, (json.dumps(template_data), template_type, category, description, existing[0]))
+                    """, (json.dumps(template_data), template_type, category, description, file_path, existing[0]))
                     template_id = existing[0]
                 else:
                     # Insert new template
@@ -111,12 +120,21 @@ class TemplateManager:
                 existing = cursor.fetchone()
                 
                 if existing:
+                    # Add source_url and file_path to template_data if provided
+                    if source_url or file_path:
+                        if not isinstance(template_data, dict):
+                            template_data = {}
+                        if source_url:
+                            template_data['source_url'] = source_url
+                        if file_path:
+                            template_data['file_path'] = file_path
+                    
                     cursor.execute("""
                         UPDATE document_templates 
                         SET template_data = %s, type = %s, category = %s, 
-                            description = %s, updated_at = CURRENT_TIMESTAMP
+                            description = %s, file_path = %s, updated_at = CURRENT_TIMESTAMP
                         WHERE id = %s
-                    """, (json.dumps(template_data), template_type, category, description, existing[0]))
+                    """, (json.dumps(template_data), template_type, category, description, file_path, existing[0]))
                     template_id = existing[0]
                 else:
                     # Add source_url and file_path to template_data if provided
