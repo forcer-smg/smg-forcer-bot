@@ -1396,8 +1396,53 @@ Match these behavior patterns in ALL your responses. Reference EXPECTED_BEHAVIOR
                         keys_tried += 1
                         self.current_key_index = (self.current_key_index + 1) % len(self.clients)
                         self.client = self.clients[self.current_key_index]
-                except (openai.AuthenticationError, openai.APIError, Exception) as e:
+                except (openai.APIConnectionError, ConnectionError, TimeoutError, Exception) as e:
                     error_str = str(e)
+                    
+                    # Check for connection errors (Unable to reach model provider)
+                    is_connection_error = (
+                        "unable to reach" in error_str.lower() or
+                        "connection" in error_str.lower() or
+                        "timeout" in error_str.lower() or
+                        "network" in error_str.lower() or
+                        isinstance(e, (openai.APIConnectionError, ConnectionError, TimeoutError))
+                    )
+                    
+                    if is_connection_error:
+                        # Connection error - retry with exponential backoff
+                        import time
+                        wait_time = min(10 * (attempt + 1), 60)  # Max 60 seconds
+                        logger.warning(f"Connection error on key {attempt + 1}: {error_str}. Waiting {wait_time}s before retry...")
+                        time.sleep(wait_time)
+                        
+                        # Retry with same key
+                        try:
+                            stream = client.chat.completions.create(
+                                model=self.model,
+                                messages=self.history,
+                                stream=True,
+                                temperature=0.75,
+                                timeout=30.0  # Add explicit timeout
+                            )
+                            full_content = ""
+                            for chunk in stream:
+                                content = chunk.choices[0].delta.content
+                                if content:
+                                    full_content += content
+                                    yield content
+                            self.history.append({"role": "assistant", "content": full_content})
+                            self._last_successful_response = full_content
+                            logger.info(f"Successfully recovered from connection error after waiting {wait_time}s")
+                            return  # Success after retry
+                        except Exception as retry_error:
+                            logger.error(f"Retry after connection error also failed: {retry_error}")
+                            last_error = retry_error
+                            keys_tried += 1
+                            # Try next key
+                            self.current_key_index = (self.current_key_index + 1) % len(self.clients)
+                            self.client = self.clients[self.current_key_index]
+                            continue  # Continue to next key
+                    
                     # Check if it's a context length error
                     if "context length" in error_str.lower() or "maximum context length" in error_str.lower() or "131072" in error_str:
                         logger.error(f"Context length error detected: {error_str}")
