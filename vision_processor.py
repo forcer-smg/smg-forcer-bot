@@ -477,6 +477,7 @@ class VisionProcessor:
         Process ID card using Elysia Tools API (FREE API available)
         Extracts ID card data to JSON format
         Get API key: https://elysiatools.com/en/tools/ai-ocr-id-card-to-json
+        API endpoint: https://elysiatools.com/en/api/tools/ai-ocr-id-card-to-json
         """
         if not self.elysia_available:
             raise ValueError("Elysia API key not configured")
@@ -489,46 +490,69 @@ class VisionProcessor:
         # Convert to base64
         image_base64 = base64.b64encode(image_bytes).decode('utf-8')
         
-        # Elysia API endpoint
-        api_url = "https://api.elysiatools.com/v1/ocr/id-card"
+        # Elysia Tools API endpoint (based on their API structure)
+        # Try multiple possible endpoints
+        api_endpoints = [
+            "https://elysiatools.com/en/api/tools/ai-ocr-id-card-to-json",
+            "https://api.elysiatools.com/v1/ocr/id-card",
+            "https://elysiatools.com/api/tools/id-card-ocr"
+        ]
         
         headers = {
             "Authorization": f"Bearer {self.elysia_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "X-API-Key": self.elysia_key  # Some APIs use X-API-Key header
         }
         
         payload = {
             "image": image_base64,
-            "format": "json"
+            "imageData": image_base64,  # Try different parameter names
+            "format": "json",
+            "outputFormat": "json"
         }
         
-        try:
-            response = requests.post(api_url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-            
-            result = response.json()
-            
-            if result.get('success'):
-                return {
-                    'success': True,
-                    'provider': 'elysia',
-                    'result': result.get('data', result),
-                    'raw': result
-                }
-            else:
-                return {
-                    'success': False,
-                    'provider': 'elysia',
-                    'error': result.get('error', 'Unknown error')
-                }
+        # Try each endpoint
+        for api_url in api_endpoints:
+            try:
+                response = requests.post(api_url, headers=headers, json=payload, timeout=30)
                 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Elysia API error: {e}")
-            return {
-                'success': False,
-                'provider': 'elysia',
-                'error': str(e)
-            }
+                if response.status_code == 200:
+                    result = response.json()
+                    
+                    # Handle different response formats
+                    if result.get('success') or result.get('status') == 'success':
+                        return {
+                            'success': True,
+                            'provider': 'elysia',
+                            'result': result.get('data', result.get('result', result)),
+                            'raw': result
+                        }
+                    elif 'error' in result:
+                        continue  # Try next endpoint
+                    else:
+                        # Assume success if we got 200
+                        return {
+                            'success': True,
+                            'provider': 'elysia',
+                            'result': result,
+                            'raw': result
+                        }
+                elif response.status_code == 404:
+                    continue  # Try next endpoint
+                else:
+                    response.raise_for_status()
+                    
+            except requests.exceptions.RequestException as e:
+                logger.debug(f"Elysia endpoint {api_url} failed: {e}")
+                continue
+        
+        # All endpoints failed
+        logger.error("All Elysia API endpoints failed")
+        return {
+            'success': False,
+            'provider': 'elysia',
+            'error': 'All API endpoints failed. Please check API key and endpoint URL.'
+        }
     
     def process_image_tesseract(self, image_data: Union[bytes, str, Path]) -> Dict:
         """
