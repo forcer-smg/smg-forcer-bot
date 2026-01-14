@@ -52,8 +52,14 @@ class AIResponseParser:
         code_blocks = self._extract_code_blocks(response_text)
         parsed['code_blocks'] = code_blocks
         
-        # Extract commands from code blocks
+        # Validate code blocks before extracting commands
+        validated_blocks = []
         for block in code_blocks:
+            validated_block = self._validate_code_block(block)
+            validated_blocks.append(validated_block)
+        
+        # Extract commands from validated code blocks
+        for block in validated_blocks:
             # If block has heredoc, treat as single shell command (don't parse Python inside)
             if block.get('has_heredoc', False):
                 # Extract the shell command line (before << EOF)

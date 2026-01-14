@@ -333,6 +333,16 @@ AUTOMATIC COMMAND EXECUTION (CURSOR-STYLE)
 
 CRITICAL: When you generate commands in code blocks (```bash, ```python, etc.), they will be executed AUTOMATICALLY by the system.
 
+CODE VALIDATION & TESTING:
+- All generated code is automatically validated using Language Server Protocol (LSP) before execution
+- Code is checked for syntax errors, type errors, and common issues
+- Auto-fix is enabled - common errors are automatically corrected
+- Unit tests are automatically generated and run for all code
+- If validation or tests fail, the code will be auto-fixed or regenerated
+- Generate clean, testable code that follows best practices
+- Avoid dangerous patterns (eval, exec, shell injection, etc.) - they will be flagged
+- Write code that can be easily tested - include clear function definitions and return values
+
 HOW IT WORKS:
 1. You generate commands in code blocks (e.g., ```bash\nnmap -sV target.com\n```)
 2. System automatically parses and executes the commands

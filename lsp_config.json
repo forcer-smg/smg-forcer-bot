@@ -1,0 +1,74 @@
+{
+  "languages": {
+    "python": {
+      "lsp_server": "pylsp",
+      "command": ["pylsp"],
+      "enabled": true
+    },
+    "bash": {
+      "lsp_server": "bash-language-server",
+      "command": ["bash-language-server", "start"],
+      "enabled": true
+    },
+    "javascript": {
+      "lsp_server": "typescript-language-server",
+      "command": ["typescript-language-server", "--stdio"],
+      "enabled": true
+    },
+    "typescript": {
+      "lsp_server": "typescript-language-server",
+      "command": ["typescript-language-server", "--stdio"],
+      "enabled": true
+    },
+    "go": {
+      "lsp_server": "gopls",
+      "command": ["gopls"],
+      "enabled": true
+    },
+    "rust": {
+      "lsp_server": "rust-analyzer",
+      "command": ["rust-analyzer"],
+      "enabled": true
+    },
+    "php": {
+      "lsp_server": "intelephense",
+      "command": ["intelephense", "--stdio"],
+      "enabled": true
+    },
+    "ruby": {
+      "lsp_server": "solargraph",
+      "command": ["solargraph", "stdio"],
+      "enabled": true
+    },
+    "sql": {
+      "lsp_server": "sql-language-server",
+      "command": ["sql-language-server", "up", "--method", "stdio"],
+      "enabled": true
+    },
+    "powershell": {
+      "lsp_server": "powershell-editor-services",
+      "command": ["pwsh", "-Command", "powershell-editor-services"],
+      "enabled": true
+    },
+    "cpp": {
+      "lsp_server": "clangd",
+      "command": ["clangd"],
+      "enabled": true
+    },
+    "c": {
+      "lsp_server": "clangd",
+      "command": ["clangd"],
+      "enabled": true
+    }
+  },
+  "validation": {
+    "auto_fix": true,
+    "max_fix_attempts": 3,
+    "strict_mode": false
+  },
+  "testing": {
+    "generate_tests": true,
+    "run_tests": true,
+    "fail_on_test_failure": false
+  }
+}

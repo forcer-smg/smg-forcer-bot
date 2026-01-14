@@ -6062,6 +6062,54 @@ You've used all your available requests.
                             # Parse AI response for commands
                             parsed = response_parser.parse_ai_response(ai_response)
                             
+                            # Validate and test code blocks before execution
+                            from code_validator import get_code_validator
+                            from test_generator import get_test_generator
+                            
+                            validator = get_code_validator()
+                            test_gen = get_test_generator()
+                            
+                            # Process code blocks: validate and test
+                            for block in parsed.get('code_blocks', []):
+                                language = block.get('language', 'bash')
+                                content = block.get('content', '')
+                                
+                                if not content:
+                                    continue
+                                
+                                # Validate code
+                                validation_result = validator.validate_code(content, language)
+                                block['validation'] = validation_result
+                                
+                                # Auto-fix if needed
+                                if not validation_result.get('valid', True):
+                                    config = validator.config
+                                    if config.get('validation', {}).get('auto_fix', True):
+                                        fixed_content, was_fixed = validator.auto_fix_code(
+                                            content,
+                                            language,
+                                            validation_result.get('errors', [])
+                                        )
+                                        if was_fixed:
+                                            block['content'] = fixed_content
+                                            logger.info(f"Auto-fixed {language} code block")
+                                
+                                # Generate and run tests if enabled
+                                config = validator.config
+                                if config.get('testing', {}).get('generate_tests', True):
+                                    try:
+                                        test_code = test_gen.generate_tests(content, language)
+                                        test_results = test_gen.run_tests(content, test_code, language, workspace)
+                                        block['test_results'] = test_results
+                                        
+                                        if not test_results.get('passed', True) and test_results.get('failures'):
+                                            # Analyze failures and suggest fixes
+                                            suggestions = test_gen.analyze_test_failures(test_results)
+                                            block['test_suggestions'] = suggestions
+                                            logger.info(f"Tests failed for {language} code block: {len(suggestions)} suggestions")
+                                    except Exception as e:
+                                        logger.warning(f"Error generating/running tests: {e}")
+                            
                             # If no commands, return response as-is
                             if not parsed['commands']:
                                 logger.debug("No commands found in AI response")

@@ -77,7 +77,8 @@ class CommandExecutor:
                        command: str, 
                        cwd: str = None, 
                        timeout: int = 300,
-                       verify: bool = True) -> Dict[str, Any]:
+                       verify: bool = True,
+                       validate_before_execute: bool = True) -> Dict[str, Any]:
         """
         Execute a single command with verification
         
@@ -86,10 +87,17 @@ class CommandExecutor:
             cwd: Working directory (defaults to workspace_path)
             timeout: Command timeout in seconds
             verify: Whether to verify command actually executed
+            validate_before_execute: Whether to validate code before execution
         
         Returns:
             Dictionary with execution results and verification status
         """
+        # Pre-execution validation for code files
+        if validate_before_execute:
+            validation_result = self._validate_command(command, cwd)
+            if validation_result and not validation_result.get('valid', True):
+                logger.warning(f"Command validation failed: {validation_result.get('errors', [])}")
+                # Still execute, but log validation issues
         result = {
             'command': command,
             'success': False,
