@@ -50,8 +50,18 @@ class CommandExecutor:
             language = match.group(1) or 'bash'
             content = match.group(2).strip()
             
-            # Extract individual commands (split by newlines, filter empty)
-            commands = [cmd.strip() for cmd in content.split('\n') if cmd.strip() and not cmd.strip().startswith('#')]
+            # For Python, treat as single script (not line by line)
+            if language.lower() == 'python':
+                # Use ai_response_parser to extract commands properly
+                from ai_response_parser import get_ai_response_parser
+                parser = get_ai_response_parser()
+                commands = parser.extract_commands(content, 'python')
+            elif language.lower() in ['bash', 'sh', 'shell', 'zsh']:
+                # For shell scripts, split by newlines
+                commands = [cmd.strip() for cmd in content.split('\n') if cmd.strip() and not cmd.strip().startswith('#')]
+            else:
+                # For other languages, treat as single command
+                commands = [content] if content else []
             
             if commands:
                 code_blocks.append({
