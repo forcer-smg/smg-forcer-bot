@@ -287,7 +287,9 @@ class AIResponseParser:
         # Skip text that looks like instructions (contains common instruction words but no executable command)
         instruction_keywords = ['full name', 'date of birth', 'address', 'license number', 'issue date', 
                                'expiration date', 'height', 'weight', 'eye color', 'sex', 'your name', 
-                               'your address', 'your dob', 'send your', 'provide your', 'enter your']
+                               'your address', 'your dob', 'send your', 'provide your', 'enter your',
+                               'name:', 'dob:', 'address:', 'license:', 'issue:', 'expiration:', 
+                               'height:', 'weight:', 'eye color:', 'sex:', 'weight:', 'eye color:']
         
         # Check if text contains instruction keywords but no actual command
         has_instruction_keyword = any(keyword in text_lower for keyword in instruction_keywords)
@@ -295,10 +297,22 @@ class AIResponseParser:
                                                                     'grep ', 'ls ', 'cat ', 'echo ', 'wget ', 
                                                                     'curl ', 'mkdir ', 'touch ', 'rm ', 'mv ', 
                                                                     'cp ', 'chmod ', 'export ', 'import ', 'from ',
-                                                                    'def ', 'class ', 'if ', 'for ', 'while '])
+                                                                    'def ', 'class ', 'if ', 'for ', 'while ',
+                                                                    'print(', 'import ', 'sys.', 'os.', 'subprocess',
+                                                                    '&&', '|', '>', '<', '$', '`'])
         
         if has_instruction_keyword and not has_executable:
             return True
+        
+        # Skip text that's just a label with placeholder (e.g., "Full Name: [Your Name]")
+        if ':' in text and '[' in text and ']' in text:
+            # Check if it's a label: [placeholder] pattern
+            colon_pos = text.find(':')
+            bracket_start = text.find('[', colon_pos)
+            bracket_end = text.find(']', bracket_start)
+            if bracket_start > colon_pos and bracket_end > bracket_start:
+                # It's a label with placeholder - not a command
+                return True
         
         # Skip text that's just a label/header (no actual command)
         if ':' in text and not any(char in text for char in ['/', '\\', '$', '`', '(', ')', '[', ']', '{', '}']):
