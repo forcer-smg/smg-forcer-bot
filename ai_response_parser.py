@@ -104,18 +104,46 @@ class AIResponseParser:
         """
         commands = []
         
+        # Check if Python code block contains shell commands (like "cd /app && python -c")
+        # If so, treat as shell command instead
+        if language == 'python' and ('cd ' in code_content or 'python -c' in code_content or 'python3 -c' in code_content or '&&' in code_content):
+            logger.info("Python code block contains shell commands, treating as shell")
+            language = 'bash'
+        
         if language in ['bash', 'sh', 'shell', 'zsh']:
-            # For shell scripts, split by newlines and filter
+            # For shell scripts, handle multi-line commands properly
             lines = code_content.split('\n')
+            current_command = []
+            
             for line in lines:
                 line = line.strip()
                 # Skip comments and empty lines
-                if line and not line.startswith('#'):
-                    # Handle multi-line commands (ending with \)
-                    if line.endswith('\\'):
-                        # Combine with next line
-                        continue
+                if not line or line.startswith('#'):
+                    continue
+                
+                # Handle multi-line commands (ending with \)
+                if line.endswith('\\'):
+                    current_command.append(line.rstrip('\\').strip())
+                    continue
+                
+                # Handle python -c with multi-line strings
+                if 'python' in line and '-c' in line and '"' in line:
+                    # Extract Python code from python -c "..."
+                    # This is a shell command that contains Python code
                     commands.append(line)
+                    continue
+                
+                # Add to current command or start new one
+                if current_command:
+                    current_command.append(line)
+                    commands.append(' '.join(current_command))
+                    current_command = []
+                else:
+                    commands.append(line)
+            
+            # Add any remaining command
+            if current_command:
+                commands.append(' '.join(current_command))
         
         elif language == 'python':
             # For Python, execute as a script file (not line by line)
