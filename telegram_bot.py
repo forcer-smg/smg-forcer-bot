@@ -4676,6 +4676,13 @@ async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
         
         # Generate summary
         summary = f"File type: {file_type}\nSize: {file_size / 1024:.1f} KB"
+        if mime_type:
+            summary += f"\nMIME type: {mime_type}"
+        
+        if file_type == 'pdf':
+            summary += "\n📄 PDF document detected"
+            if file_content:
+                summary += f"\nPreview (first page): {file_content[:200]}..."
         
         if file_content:
             lines = len(file_content.split('\n'))
@@ -4697,7 +4704,10 @@ async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
                 classes = len(re.findall(r'class\s+\w+', file_content, re.MULTILINE | re.IGNORECASE))
                 summary += f"\nFunctions: {functions}\nClasses: {classes}"
         else:
-            summary += "\n⚠️ File too large or binary - content not read"
+            if file_type == 'pdf':
+                summary += "\n📄 PDF document (binary format)"
+            else:
+                summary += "\n⚠️ File too large or binary - content not read"
         
         return {
             'summary': summary,
