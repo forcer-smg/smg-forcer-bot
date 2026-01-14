@@ -709,8 +709,9 @@ TASK COMPLETION REQUIREMENTS:
 
 CRITICAL: When processing templates (like Texas ID with photo):
 1. **FIRST: Check database for templates** → Query template_manager for existing templates
-   - Use Python: `from template_manager import get_template_manager; tm = get_template_manager(); template = tm.get_template(name='texas_dl')`
+   - Use Python: `from template_manager import get_template_manager; from database_hybrid import Database; db = Database(); tm = get_template_manager(db); template = tm.get_template(name='texas_dl')`
    - Or check: `templates = tm.list_templates(template_type='id')` to find ID templates
+   - Template fields: 'name', 'type', 'file_path', 'description', 'is_global', 'template_data' (NOT 'template_type', 'tags', or 'db_path')
    - Search for templates: Look for name containing 'texas', 'id', 'driver', 'license'
    - If template found in database: USE IT (don't create new basic template)
 2. If template found: Load from database → Use file_path from template record
