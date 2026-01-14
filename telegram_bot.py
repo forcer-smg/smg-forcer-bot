@@ -5091,6 +5091,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.debug(f"Empty message from user {user_id}, skipping")
         return
     
+    # JOB QUEUE: Check if this should be processed as a background job
+    # Skip job queue for simple queries (greetings, status checks, etc.)
+    simple_queries = ['hello', 'hi', 'hey', 'status', 'help', 'what', 'how', 'when', 'where', 'why']
+    is_simple_query = any(query in user_message.lower()[:20] for query in simple_queries)
+    
+    # Skip job queue for ID generation (handled specially)
+    is_id_generation = any(keyword in user_message.lower() for keyword in ['id', 'driver', 'license', 'identification'])
+    
+    # Use job queue for complex tasks (generation, scanning, hacking, etc.)
+    complex_keywords = ['generate', 'create', 'build', 'scan', 'check', 'hack', 'exploit', 'vulnerability', 
+                       'test', 'run', 'execute', 'analyze', 'find', 'search', 'develop', 'code']
+    is_complex_task = any(keyword in user_message.lower() for keyword in complex_keywords)
+    
+    if is_complex_task and not is_simple_query and not is_id_generation:
+        try:
+            from job_queue import get_job_queue, JobStatus
+            job_queue = get_job_queue(db)
+            
+            # Create job
+            job_id = job_queue.create_job(
+                user_id=user_id,
+                chat_id=update.effective_chat.id,
+                task_description=user_message,
+                job_data={'user_message': user_message, 'chat_id': update.effective_chat.id}
+            )
+            
+            # Send initial acknowledgment
+            initial_msg = await update.message.reply_text(
+                f"🔄 **Task Started**\n\n"
+                f"Your request is being processed in the background.\n"
+                f"Job ID: `{job_id[:8]}`\n\n"
+                f"I'll stream progress updates automatically until completion.",
+                parse_mode='Markdown'
+            )
+            
+            # Update job with initial message ID
+            job_queue.update_job(job_id, last_message_id=initial_msg.message_id, status=JobStatus.RUNNING)
+            
+            logger.info(f"Created job {job_id} for user {user_id}: {user_message[:100]}")
+            return  # Job worker will handle the rest
+            
+        except Exception as e:
+            logger.error(f"Error creating job: {e}", exc_info=True)
+            # Fall through to normal processing
+    
     # RESTORE STATE: Check for pending tasks and saved data from previous session
     try:
         from user_state_manager import get_user_state_manager
