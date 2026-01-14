@@ -493,6 +493,21 @@ ls -la "file_path" 2>/dev/null || echo "File does not exist"
    - Check for project indicators: ls -la | grep -E "(requirements.txt|go.mod|package.json|Cargo.toml)"
    - Detect project type before creating files
 
+SERVICE MANAGEMENT FOR LONG-RUNNING PROCESSES:
+For services that need to run continuously (evilginx, web servers, etc.):
+1. Check if service already running: ps aux | grep "service_name" || pgrep -f "service_name"
+2. If running: Inform user and ask if they want to stop/restart or use existing
+3. Start service in background using nohup: nohup command > logfile 2>&1 &
+4. Track the PID: echo $! to get process ID
+5. Store service info: The system will automatically track PID, status, and logs
+6. For evilginx specifically: 
+   - Check if already running: ps aux | grep evilginx
+   - If not running: cd workspace && nohup ./evilginx -p phishlets/ > evilginx.log 2>&1 &
+   - Note the PID and inform user the service is running
+
+IMPORTANT: Services like evilginx, web servers, or any long-running process should be started in background.
+The system will automatically track and manage these services via the service manager.
+
 SCRIPT CREATION - Create Scripts On The Fly:
 When you need to create a script, FIRST check if it exists:
 ```bash
