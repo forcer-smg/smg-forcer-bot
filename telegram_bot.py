@@ -5235,12 +5235,16 @@ If you believe this is an error, please contact support.
         except Exception as e:
             logger.warning(f"Could not restore photo from state: {e}")
     
-    # CHECK FOR "SEND ME THE GENERATED ID" REQUEST
+    # CHECK FOR "SEND ME THE GENERATED ID" OR "SEND RESULTS NOW" REQUEST
     message_lower = user_message.lower()
-    if any(phrase in message_lower for phrase in ['send me the generated id', 'send me the id', 'where is the id', 'do you have the id', 'show me the id']):
+    send_results_phrases = ['send me the generated id', 'send me the id', 'where is the id', 'do you have the id', 
+                            'show me the id', 'send results now', 'send them', 'send it', 'are you done', 
+                            'send the id', 'send the results', 'send now']
+    if any(phrase in message_lower for phrase in send_results_phrases):
         # Check if ID was already generated
         try:
             from user_state_manager import get_user_state_manager
+            from pathlib import Path as PathLib
             state_mgr = get_user_state_manager(db)
             
             # Check for delivered results
@@ -5250,13 +5254,12 @@ If you believe this is an error, please contact support.
                 for result in delivered:
                     if result.get('type') == 'id_image' and result.get('path'):
                         id_path = result['path']
-                        if Path(id_path).exists():
+                        if PathLib(id_path).exists():
                             # Send existing ID
                             with open(id_path, 'rb') as f:
-                                await update.message.reply_document(
-                                    document=f,
-                                    filename=Path(id_path).name,
-                                    caption="✅ **Texas ID (Previously Generated)**"
+                                await update.message.reply_photo(
+                                    photo=f,
+                                    caption="✅ **ID (Previously Generated)**"
                                 )
                             logger.info(f"Sent previously generated ID: {id_path}")
                             return
@@ -5268,18 +5271,17 @@ If you believe this is an error, please contact support.
                 user_workspace = workspace_manager.get_user_workspace(user_id)
             except ImportError:
                 base_workspace = os.getenv('WORKSPACE_ROOT', os.getcwd())
-                user_workspace = Path(os.path.join(base_workspace, f"user_{user_id}"))
+                user_workspace = PathLib(os.path.join(base_workspace, f"user_{user_id}"))
             
-            # Search for ID files
-            id_files = list(user_workspace.rglob('*id*.png')) + list(user_workspace.rglob('*texas*.png'))
+            # Search for ID files (front and back)
+            id_files = list(user_workspace.rglob('*id*.png')) + list(user_workspace.rglob('*florida*.png')) + list(user_workspace.rglob('*texas*.png'))
             if id_files:
                 # Get most recent
                 latest_id = max(id_files, key=lambda p: p.stat().st_mtime)
                 with open(latest_id, 'rb') as f:
-                    await update.message.reply_document(
-                        document=f,
-                        filename=latest_id.name,
-                        caption="✅ **Texas ID Found**"
+                    await update.message.reply_photo(
+                        photo=f,
+                        caption="✅ **Generated ID**"
                     )
                 logger.info(f"Sent found ID: {latest_id}")
                 return
@@ -5292,7 +5294,7 @@ If you believe this is an error, please contact support.
                     user_photo = photo_state['value']['path']
                     context.user_data['last_photo'] = user_photo
             
-            if user_photo and Path(user_photo).exists():
+            if user_photo and PathLib(user_photo).exists():
                 # Get saved user data
                 user_data = context.user_data.get('saved_user_data', {})
                 if not user_data:
@@ -5301,8 +5303,69 @@ If you believe this is an error, please contact support.
                         user_data = user_data_state.get('value', {})
                 
                 if user_data:
-                    await update.message.reply_text("🔄 Generating ID from saved photo and data...")
-                    # Will fall through to ID generation below
+                    # Get requested state
+                    requested_state = None
+                    state_history = state_mgr.get_state(user_id, 'requested_state')
+                    if state_history and state_history.get('value'):
+                        requested_state = state_history['value']
+                    
+                    # Default to Florida if mentioned, else Texas
+                    if 'florida' in message_lower or 'fl' in message_lower:
+                        requested_state = 'florida'
+                    elif not requested_state:
+                        requested_state = 'texas'
+                    
+                    # Actually generate ID now
+                    await update.message.reply_text(f"🔄 Generating {requested_state.title()} ID from saved photo and data...")
+                    
+                    try:
+                        from template_manager import get_template_manager
+                        from id_template_processor import get_id_processor
+                        
+                        tm = get_template_manager(db)
+                        id_processor = get_id_processor()
+                        
+                        # Find template
+                        template_name_map = {
+                            'texas': 'texas_dl',
+                            'florida': 'florida_dl',
+                            'california': 'california_dl'
+                        }
+                        template_name = template_name_map.get(requested_state, 'texas_dl')
+                        
+                        # Generate ID
+                        filepath = id_processor.process_texas_id_with_photo(
+                            user_photo,
+                            template_name=template_name,
+                            user_data=user_data
+                        )
+                        
+                        if filepath and PathLib(filepath).exists():
+                            file_size = PathLib(filepath).stat().st_size
+                            if file_size > 0:
+                                # Send the ID
+                                with open(filepath, 'rb') as f:
+                                    await update.message.reply_photo(
+                                        photo=f,
+                                        caption=f"✅ **{requested_state.title()} ID Generated**\n\n"
+                                               f"Name: {user_data.get('name', 'N/A')}\n"
+                                               f"DOB: {user_data.get('dob', 'N/A')}\n"
+                                               f"Address: {user_data.get('address', 'N/A')}",
+                                        parse_mode='Markdown'
+                                    )
+                                logger.info(f"Generated and sent ID: {filepath}")
+                                
+                                # Mark as delivered
+                                state_mgr.mark_result_delivered(user_id, 'id_image', filepath)
+                                return
+                            else:
+                                await update.message.reply_text("❌ Generated ID file is empty. Please try again.")
+                        else:
+                            await update.message.reply_text("❌ ID generation failed. Please try again with a clear photo.")
+                    except Exception as e:
+                        logger.error(f"Error generating ID: {e}", exc_info=True)
+                        await update.message.reply_text(f"❌ Error generating ID: {str(e)}")
+                    return
                 else:
                     await update.message.reply_text("❌ I have your photo but need name/DOB/address. Please provide:\n\nName: [Your Name]\nDOB: [MM/DD/YYYY]\nAddress: [Your Address]")
                     return

@@ -60,6 +60,10 @@ class AIResponseParser:
         
         # Extract commands from validated code blocks
         for block in validated_blocks:
+            # Use validated content (may have been auto-fixed)
+            block_content = block.get('content', '')
+            block_language = block.get('language', 'bash')
+            
             # If block has heredoc, treat as single shell command (don't parse Python inside)
             if block.get('has_heredoc', False):
                 # Extract the shell command line (before << EOF)
@@ -73,10 +77,10 @@ class AIResponseParser:
                         parsed['commands'].append(full_heredoc_match.group(1).strip())
                     else:
                         parsed['commands'].append(block['content'])
-                else:
-                    parsed['commands'].append(block['content'])
+                    else:
+                        parsed['commands'].append(block_content)
             else:
-                commands = self.extract_commands(block['content'], block['language'])
+                commands = self.extract_commands(block_content, block_language)
                 parsed['commands'].extend(commands)
         
         # Extract thinking/explanation (text outside code blocks)
