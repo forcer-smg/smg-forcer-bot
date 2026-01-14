@@ -344,7 +344,7 @@ async def safe_reply_text(update: Update, text: str, parse_mode: str = 'Markdown
 # Message edit rate limiting and failure tracking (replaces old _message_content_cache)
 # These are defined at module level after the lock initialization
 
-async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', max_retries: int = 1, min_edit_interval: float = 2.0, **kwargs):
+async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', max_retries: int = 0, min_edit_interval: float = 5.0, **kwargs):
     """
     Safely edit a message with Markdown, falling back to plain text if parsing fails.
     Includes content caching, length checks, rate limiting, and retry logic with backoff.
@@ -389,7 +389,7 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
             
             # Check if this message has too many consecutive failures
             if message_id in _message_edit_failures:
-                if _message_edit_failures[message_id] >= 3:
+                if _message_edit_failures[message_id] >= 2:  # Reduced from 3 to 2
                     # Too many failures - stop trying to edit, send new message instead
                     try:
                         if hasattr(query, 'message') and query.message:
@@ -440,6 +440,25 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
         except BadRequest as e:
             last_error = e
             error_str = str(e).lower()
+            
+            # Handle 400 Bad Request errors - DO NOT RETRY (these are permanent errors)
+            if '400' in error_str or 'bad request' in error_str:
+                logger.warning(f"400 Bad Request on edit_message_text - stopping edits for this message: {e}")
+                # Mark as failed and stop trying
+                if message_id:
+                    with _message_edit_lock:
+                        _message_edit_failures[message_id] = 999  # Mark as permanently failed
+                # Don't retry - send new message instead
+                try:
+                    if hasattr(query, 'message') and query.message:
+                        await query.message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
+                    elif hasattr(query, 'effective_message') and query.effective_message:
+                        await query.effective_message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
+                    if rate_limiter:
+                        rate_limiter.record_message_sent()
+                except Exception:
+                    pass
+                return
             
             # Handle 429 rate limit errors
             if '429' in error_str or 'too many requests' in error_str or 'rate limit' in error_str:
