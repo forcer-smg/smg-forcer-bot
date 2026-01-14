@@ -344,7 +344,7 @@ async def safe_reply_text(update: Update, text: str, parse_mode: str = 'Markdown
 # Message edit rate limiting and failure tracking (replaces old _message_content_cache)
 # These are defined at module level after the lock initialization
 
-async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', max_retries: int = 2, min_edit_interval: float = 0.5, **kwargs):
+async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', max_retries: int = 1, min_edit_interval: float = 2.0, **kwargs):
     """
     Safely edit a message with Markdown, falling back to plain text if parsing fails.
     Includes content caching, length checks, rate limiting, and retry logic with backoff.
@@ -353,10 +353,16 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
         query: Query object (CallbackQuery or Update)
         text: Text to send
         parse_mode: Parse mode (default: 'Markdown')
-        max_retries: Maximum retry attempts (default: 2, reduced from 3)
-        min_edit_interval: Minimum seconds between edits for same message (default: 0.5)
+        max_retries: Maximum retry attempts (default: 1, reduced to prevent spam)
+        min_edit_interval: Minimum seconds between edits for same message (default: 2.0, increased)
         **kwargs: Additional arguments for edit_message_text
     """
+    # Get rate limiter
+    try:
+        from telegram_rate_limiter import get_telegram_rate_limiter
+        rate_limiter = get_telegram_rate_limiter()
+    except ImportError:
+        rate_limiter = None
     # Get message ID for caching
     message_id = None
     chat_id = None
