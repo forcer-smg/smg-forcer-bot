@@ -110,6 +110,14 @@ def get_admin_dashboard_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("⭐ Subscriptions", callback_data="admin_subscriptions")
         ],
         [
+            InlineKeyboardButton("📁 All Workspaces", callback_data="admin_workspaces"),
+            InlineKeyboardButton("📂 All Projects", callback_data="admin_projects")
+        ],
+        [
+            InlineKeyboardButton("🖥️ All Services", callback_data="admin_services"),
+            InlineKeyboardButton("📊 Workspace Stats", callback_data="admin_workspace_stats")
+        ],
+        [
             InlineKeyboardButton("🔍 Search User by ID", callback_data="admin_search_user"),
             InlineKeyboardButton("🎁 Free Upgrade", callback_data="admin_free_upgrade")
         ],
@@ -404,7 +412,7 @@ Please check if the dashboard is running.
             return
     
         # Admin panel
-        if data == "dashboard_admin":
+        if data == "dashboard_admin" or data == "admin_dashboard":
             if not is_admin:
                 await query.answer("❌ Admin access required", show_alert=True)
                 return
@@ -420,6 +428,8 @@ Manage dashboard and system settings.
 • View system statistics
 • Manage users
 • Monitor payments
+• View workspaces & projects
+• Monitor services
 • Configure notifications
 • View analytics
 
@@ -1233,6 +1243,188 @@ Use the desktop app to view detailed command history.
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+            return
+        
+        # Admin workspace management
+        if data == "admin_workspaces":
+            if not is_admin:
+                await query.answer("❌ Admin access required", show_alert=True)
+                return
+            
+            try:
+                from admin_workspace_manager import get_admin_workspace_manager
+                admin_mgr = get_admin_workspace_manager(db)
+                workspaces = admin_mgr.list_all_workspaces()
+                
+                if not workspaces:
+                    text = "📋 *All User Workspaces*\n\nNo workspaces found."
+                else:
+                    text = "📋 *All User Workspaces*\n\n"
+                    for ws in workspaces[:15]:  # Limit to 15 for message size
+                        user_id = ws.get('user_id', 'N/A')
+                        username = ws.get('username', 'N/A') or f"User {user_id}"
+                        project_count = ws.get('project_count', 0)
+                        service_count = ws.get('service_count', 0)
+                        
+                        text += f"👤 *{username}* (ID: `{user_id}`)\n"
+                        text += f"Projects: `{project_count}` | Services: `{service_count}`\n"
+                        if ws.get('workspace_exists'):
+                            size_mb = ws.get('workspace_size', 0) / 1024 / 1024
+                            text += f"Size: `{size_mb:.1f} MB`\n"
+                        text += "\n"
+                    
+                    if len(workspaces) > 15:
+                        text += f"\n... and {len(workspaces) - 15} more workspaces\n"
+                        text += "Use `/admin_workspace [user_id]` for details"
+                
+                keyboard = [
+                    [InlineKeyboardButton("🔄 Refresh", callback_data="admin_workspaces")],
+                    [InlineKeyboardButton("📊 Dashboard", callback_data="dashboard_admin")],
+                    [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+            except Exception as e:
+                logger.error(f"Error showing workspaces: {e}", exc_info=True)
+                await query.answer(f"❌ Error: {str(e)[:50]}", show_alert=True)
+            return
+        
+        if data == "admin_projects":
+            if not is_admin:
+                await query.answer("❌ Admin access required", show_alert=True)
+                return
+            
+            try:
+                # Get all projects from all users
+                from admin_workspace_manager import get_admin_workspace_manager
+                admin_mgr = get_admin_workspace_manager(db)
+                workspaces = admin_mgr.list_all_workspaces()
+                
+                all_projects = []
+                for ws in workspaces:
+                    user_id = ws.get('user_id')
+                    try:
+                        projects = db.list_user_projects(user_id)
+                        for project in projects:
+                            project['user_id'] = user_id
+                            project['username'] = ws.get('username', f"User {user_id}")
+                            all_projects.append(project)
+                    except:
+                        pass
+                
+                if not all_projects:
+                    text = "📂 *All User Projects*\n\nNo projects found."
+                else:
+                    text = f"📂 *All User Projects*\n\nTotal: {len(all_projects)} projects\n\n"
+                    for project in all_projects[:15]:  # Limit to 15
+                        project_name = project.get('project_name', 'N/A')
+                        project_type = project.get('project_type', 'N/A')
+                        user_id = project.get('user_id', 'N/A')
+                        username = project.get('username', f"User {user_id}")
+                        
+                        text += f"📁 *{project_name}*\n"
+                        text += f"Type: `{project_type}` | User: {username} (ID: `{user_id}`)\n"
+                        if project.get('created_at'):
+                            text += f"Created: `{str(project.get('created_at'))[:16]}`\n"
+                        text += "\n"
+                    
+                    if len(all_projects) > 15:
+                        text += f"\n... and {len(all_projects) - 15} more projects"
+                
+                keyboard = [
+                    [InlineKeyboardButton("🔄 Refresh", callback_data="admin_projects")],
+                    [InlineKeyboardButton("📊 Dashboard", callback_data="dashboard_admin")],
+                    [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+            except Exception as e:
+                logger.error(f"Error showing projects: {e}", exc_info=True)
+                await query.answer(f"❌ Error: {str(e)[:50]}", show_alert=True)
+            return
+        
+        if data == "admin_services":
+            if not is_admin:
+                await query.answer("❌ Admin access required", show_alert=True)
+                return
+            
+            try:
+                all_services = db.get_all_services()
+                
+                if not all_services:
+                    text = "🖥️ *All Active Services*\n\nNo services found."
+                else:
+                    text = f"🖥️ *All Active Services*\n\nTotal: {len(all_services)} services\n\n"
+                    for service in all_services[:15]:  # Limit to 15
+                        user_id = service.get('user_id', 'N/A')
+                        service_name = service.get('service_name', 'N/A')
+                        status = service.get('status', 'unknown')
+                        status_emoji = "🟢" if status == 'running' else "🔴"
+                        
+                        text += f"{status_emoji} *{service_name}*\n"
+                        text += f"User: `{user_id}` | Status: `{status}`\n"
+                        if service.get('pid'):
+                            text += f"PID: `{service.get('pid')}`\n"
+                        text += "\n"
+                    
+                    if len(all_services) > 15:
+                        text += f"\n... and {len(all_services) - 15} more services"
+                
+                keyboard = [
+                    [InlineKeyboardButton("🔄 Refresh", callback_data="admin_services")],
+                    [InlineKeyboardButton("📊 Dashboard", callback_data="dashboard_admin")],
+                    [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+            except Exception as e:
+                logger.error(f"Error showing services: {e}", exc_info=True)
+                await query.answer(f"❌ Error: {str(e)[:50]}", show_alert=True)
+            return
+        
+        if data == "admin_workspace_stats":
+            if not is_admin:
+                await query.answer("❌ Admin access required", show_alert=True)
+                return
+            
+            try:
+                from admin_workspace_manager import get_admin_workspace_manager
+                admin_mgr = get_admin_workspace_manager(db)
+                workspaces = admin_mgr.list_all_workspaces()
+                
+                total_workspaces = len(workspaces)
+                total_projects = sum(ws.get('project_count', 0) for ws in workspaces)
+                total_services = sum(ws.get('service_count', 0) for ws in workspaces)
+                total_size = sum(ws.get('workspace_size', 0) for ws in workspaces)
+                total_size_mb = total_size / 1024 / 1024
+                hosting_count = sum(1 for ws in workspaces if ws.get('hosting_detected', False))
+                
+                text = f"""
+╔═══════════════════════════════════════╗
+║   📊 WORKSPACE STATISTICS 📊           ║
+╚═══════════════════════════════════════╝
+
+┌─ OVERVIEW ───────────────────────────┐
+│ Total Workspaces: `{total_workspaces:<20}` │
+│ Total Projects: `{total_projects:<22}` │
+│ Total Services: `{total_services:<22}` │
+│ Total Size: `{total_size_mb:.1f} MB`          │
+│ Hosting Detected: `{hosting_count:<18}` │
+└──────────────────────────────────────┘
+
+**Use `/admin_workspace [user_id]` for user details**
+                """
+                
+                keyboard = [
+                    [InlineKeyboardButton("🔄 Refresh", callback_data="admin_workspace_stats")],
+                    [InlineKeyboardButton("📁 All Workspaces", callback_data="admin_workspaces")],
+                    [InlineKeyboardButton("📊 Dashboard", callback_data="dashboard_admin")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+            except Exception as e:
+                logger.error(f"Error showing workspace stats: {e}", exc_info=True)
+                await query.answer(f"❌ Error: {str(e)[:50]}", show_alert=True)
             return
     
         if data == "admin_upgrade_menu":
