@@ -335,23 +335,102 @@ async def safe_reply_text(update: Update, text: str, parse_mode: str = 'Markdown
             raise
 
 
-async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', **kwargs):
-    """Safely edit a message with Markdown, falling back to plain text if parsing fails."""
-    try:
-        await query.edit_message_text(text, parse_mode=parse_mode, **kwargs)
-    except BadRequest as e:
-        # Handle Markdown parsing errors specifically
-        if 'parse' in str(e).lower() or 'entity' in str(e).lower():
-            # Markdown parsing failed, try with escaped text
-            try:
-                escaped_text = escape_markdown(text)
-                await query.edit_message_text(escaped_text, parse_mode=parse_mode, **kwargs)
-            except Exception:
-                # If escaping also fails, send as plain text
-                await query.edit_message_text(text, parse_mode=None, **kwargs)
-        else:
-            # Re-raise if it's a different BadRequest error
-            raise
+# Message content cache to prevent duplicate edits
+_message_content_cache: Dict[str, str] = {}
+
+async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', max_retries: int = 3, **kwargs):
+    """
+    Safely edit a message with Markdown, falling back to plain text if parsing fails.
+    Includes content caching, length checks, and retry logic with backoff.
+    """
+    # Get message ID for caching
+    message_id = None
+    if hasattr(query, 'message') and query.message:
+        message_id = f"{query.message.chat.id}_{query.message.message_id}"
+    elif hasattr(query, 'effective_message') and query.effective_message:
+        message_id = f"{query.effective_message.chat.id}_{query.effective_message.message_id}"
+    
+    # Check if content is unchanged
+    if message_id and message_id in _message_content_cache:
+        if _message_content_cache[message_id] == text:
+            return  # Skip unchanged edit
+    
+    # Check message length (Telegram limit is 4096 chars)
+    if len(text) > 4000:
+        # Truncate and add indicator
+        text = text[:4000] + "\n\n... (message truncated)"
+    
+    # Retry logic with exponential backoff
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            await query.edit_message_text(text, parse_mode=parse_mode, **kwargs)
+            # Cache successful edit
+            if message_id:
+                _message_content_cache[message_id] = text
+            return
+        except BadRequest as e:
+            last_error = e
+            error_str = str(e).lower()
+            
+            # Handle specific error types
+            if 'message is not modified' in error_str:
+                # Content unchanged - cache and return
+                if message_id:
+                    _message_content_cache[message_id] = text
+                return
+            
+            if 'message to edit not found' in error_str or 'message can\'t be edited' in error_str:
+                # Message can't be edited - send new message instead
+                if hasattr(query, 'message') and query.message:
+                    await query.message.reply_text(text, parse_mode=parse_mode, **kwargs)
+                elif hasattr(query, 'effective_message') and query.effective_message:
+                    await query.effective_message.reply_text(text, parse_mode=parse_mode, **kwargs)
+                return
+            
+            # Handle Markdown parsing errors
+            if 'parse' in error_str or 'entity' in error_str:
+                # Try with escaped text
+                try:
+                    escaped_text = escape_markdown(text)
+                    await query.edit_message_text(escaped_text, parse_mode=parse_mode, **kwargs)
+                    if message_id:
+                        _message_content_cache[message_id] = text
+                    return
+                except Exception:
+                    # If escaping also fails, send as plain text
+                    try:
+                        await query.edit_message_text(text, parse_mode=None, **kwargs)
+                        if message_id:
+                            _message_content_cache[message_id] = text
+                        return
+                    except Exception:
+                        pass
+            
+            # Exponential backoff for retries
+            if attempt < max_retries - 1:
+                wait_time = (2 ** attempt) * 0.1  # 0.1s, 0.2s, 0.4s
+                await asyncio.sleep(wait_time)
+            else:
+                # Last attempt failed - send new message instead of editing
+                try:
+                    if hasattr(query, 'message') and query.message:
+                        await query.message.reply_text(text, parse_mode=parse_mode, **kwargs)
+                    elif hasattr(query, 'effective_message') and query.effective_message:
+                        await query.effective_message.reply_text(text, parse_mode=parse_mode, **kwargs)
+                except Exception as send_error:
+                    logger.warning(f"Failed to send message after edit failure: {send_error}")
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                wait_time = (2 ** attempt) * 0.1
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"Error editing message after {max_retries} attempts: {e}")
+    
+    # If all retries failed, log but don't raise
+    if last_error:
+        logger.warning(f"Could not edit message after {max_retries} attempts: {last_error}")
 
 
 class TelegramUI:
@@ -4664,10 +4743,75 @@ You've used all your available requests.
                 try:
                     from file_generator import is_file_size_valid, MAX_FILE_SIZE
                     from pathlib import Path
+                    from task_summary_generator import get_task_summary_generator
+                    import time
                     
+                    # Get task information for summary
+                    task_description = context.user_data.get('last_task_description', user_message)
+                    task_results = context.user_data.get('last_task_results', {})
+                    task_start_time = context.user_data.get('task_start_time', time.time())
+                    task_duration = time.time() - task_start_time
+                    
+                    # Generate summary
+                    summary_generator = get_task_summary_generator()
+                    
+                    # Prepare file information
+                    file_info_list = []
                     for file_path in generated_files:
                         if not file_path or not Path(file_path).exists():
                             continue
+                        
+                        file_info = summary_generator.generate_file_usage_guide(file_path)
+                        file_info_list.append(file_info)
+                    
+                    # Generate and send summary
+                    if file_info_list:
+                        summary_text = summary_generator.generate_summary(
+                            task_description=task_description,
+                            results=task_results,
+                            files=file_info_list,
+                            duration=task_duration,
+                            status='complete'
+                        )
+                        
+                        # Send summary as document
+                        try:
+                            from document_generator import get_document_generator
+                            doc_gen = get_document_generator()
+                            summary_file = doc_gen.generate_pdf(
+                                summary_text,
+                                filename=f"task_summary_{int(time.time())}.pdf",
+                                title="Task Completion Summary"
+                            )
+                            
+                            if summary_file and Path(summary_file).exists():
+                                with open(summary_file, 'rb') as f:
+                                    file_keyboard = ensure_mode_keyboard_at_bottom(user_id, context)
+                                    await update.message.reply_document(
+                                        document=f,
+                                        filename=Path(summary_file).name,
+                                        caption="📋 *Task Completion Summary*\n\nIncludes usage instructions and results overview",
+                                        parse_mode='Markdown',
+                                        reply_markup=file_keyboard
+                                    )
+                        except Exception as e:
+                            logger.warning(f"Could not generate summary PDF, sending as text: {e}")
+                            # Send summary as text message
+                            summary_preview = summary_text[:3000] + ("..." if len(summary_text) > 3000 else "")
+                            file_keyboard = ensure_mode_keyboard_at_bottom(user_id, context)
+                            await update.message.reply_text(
+                                f"📋 *Task Completion Summary*\n\n{summary_preview}",
+                                parse_mode='Markdown',
+                                reply_markup=file_keyboard
+                            )
+                    
+                    # Send files with descriptions
+                    for file_path in generated_files:
+                        if not file_path or not Path(file_path).exists():
+                            continue
+                        
+                        # Find file info
+                        file_info = next((f for f in file_info_list if f['name'] == Path(file_path).name), None)
                         
                         # Check file size
                         if is_file_size_valid(file_path):
@@ -4675,9 +4819,17 @@ You've used all your available requests.
                                 with open(file_path, 'rb') as f:
                                     # Add mode keyboard to file sending
                                     file_keyboard = ensure_mode_keyboard_at_bottom(user_id, context)
+                                    
+                                    # Create caption with usage info
+                                    caption = None
+                                    if file_info:
+                                        caption = f"📄 *{file_info['desc']}*\n\n*Usage:*\n```\n{file_info['usage']}\n```"
+                                    
                                     await update.message.reply_document(
                                         document=f,
                                         filename=Path(file_path).name,
+                                        caption=caption,
+                                        parse_mode='Markdown',
                                         reply_markup=file_keyboard
                                     )
                                 logger.info(f"Sent file: {file_path}")

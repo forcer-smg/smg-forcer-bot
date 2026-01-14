@@ -88,13 +88,14 @@ class AdvancedTaskHandler:
             self.send_update(error_msg, "CRITICAL")
             return {'error': str(e)}
     
-    async def handle_scan_task(self, target: str, scan_type: str = "comprehensive") -> Dict:
+    async def handle_scan_task(self, target: str, scan_type: str = "comprehensive", progress_streamer=None) -> Dict:
         """
         Handle scanning task with advanced techniques
         Uses multiple tools and techniques in parallel
         """
         self.send_update(f"🔍 *Starting Advanced Scan*\n\nTarget: `{target}`\nType: {scan_type}")
         
+        start_time = time.time()
         results = {
             'target': target,
             'scan_type': scan_type,
@@ -104,9 +105,19 @@ class AdvancedTaskHandler:
             'quality_metrics': {}
         }
         
+        # Initialize progress streamer if provided
+        if progress_streamer:
+            progress_streamer.set_task_info(f"Advanced Scan: {target}", estimated_duration=1800)  # 30 min estimate
+            progress_streamer.update_progress("Initializing scan", progress_pct=0, results_count=0)
+            await progress_streamer.send_progress_update(force=True)
+        
         # Use advanced exploitation framework for scanning
         if ADVANCED_FRAMEWORK_AVAILABLE:
             try:
+                if progress_streamer:
+                    progress_streamer.update_progress("Running comprehensive exploitation", progress_pct=20)
+                    await progress_streamer.send_progress_update()
+                
                 framework = AdvancedExploitationFramework(target, self.notifier)
                 exploitation_results = framework.run_comprehensive_exploitation()
                 
@@ -114,11 +125,24 @@ class AdvancedTaskHandler:
                 results['findings'] = exploitation_results.get('vulnerabilities', [])
                 results['quality_metrics'] = exploitation_results.get('quality_metrics', {})
                 
+                if progress_streamer:
+                    progress_streamer.update_progress(
+                        "Scan complete", 
+                        progress_pct=100, 
+                        results_count=len(results['findings']),
+                        details=f"Found {len(results['findings'])} vulnerabilities"
+                    )
+                    await progress_streamer.send_progress_update(force=True)
+                    await progress_streamer.send_final_update(success=True, summary=f"Found {len(results['findings'])} vulnerabilities")
+                
             except Exception as e:
                 logger.error(f"Advanced scan failed: {e}")
                 results['error'] = str(e)
+                if progress_streamer:
+                    await progress_streamer.send_final_update(success=False, summary=f"Error: {str(e)}")
         
         results['end_time'] = datetime.now().isoformat()
+        results['duration'] = time.time() - start_time
         return results
     
     def compare_quality(self, results: Dict) -> Dict:
