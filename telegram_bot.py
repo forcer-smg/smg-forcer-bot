@@ -6182,7 +6182,9 @@ You've used all your available requests.
                             validator = get_code_validator()
                             test_gen = get_test_generator()
                             
-                            # Process code blocks: validate and test
+                            # Process code blocks: validate, test, and GENERATE FILES
+                            code_blocks_to_generate = []
+                            
                             for block in parsed.get('code_blocks', []):
                                 language = block.get('language', 'bash')
                                 content = block.get('content', '')
@@ -6222,6 +6224,35 @@ You've used all your available requests.
                                             logger.info(f"Tests failed for {language} code block: {len(suggestions)} suggestions")
                                     except Exception as e:
                                         logger.warning(f"Error generating/running tests: {e}")
+                                
+                                # Add to list for file generation
+                                code_blocks_to_generate.append(block)
+                            
+                            # ACTUALLY GENERATE FILES FROM CODE BLOCKS
+                            if code_blocks_to_generate:
+                                try:
+                                    from file_generator import FileGenerator
+                                    file_gen = FileGenerator(str(workspace))
+                                    
+                                    # Generate files
+                                    generated_files = file_gen.generate_files(
+                                        code_blocks_to_generate,
+                                        subdirectory=None,
+                                        validate=False  # Already validated above
+                                    )
+                                    
+                                    # Add to context for sending
+                                    if 'generated_files' not in context.user_data:
+                                        context.user_data['generated_files'] = []
+                                    
+                                    for gen_file in generated_files:
+                                        if gen_file.get('full_path'):
+                                            context.user_data['generated_files'].append(gen_file['full_path'])
+                                            logger.info(f"Generated file added to send queue: {gen_file['full_path']}")
+                                    
+                                    logger.info(f"Generated {len(generated_files)} files from code blocks")
+                                except Exception as e:
+                                    logger.error(f"Error generating files from code blocks: {e}", exc_info=True)
                             
                             # If no commands, return response as-is
                             if not parsed['commands']:
