@@ -3324,9 +3324,16 @@ async def generate_document_command(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text(f"❌ Unknown document type: {doc_type}")
             return
         
-        if filepath:
+        if filepath and Path(filepath).exists():
+            # Verify file is not empty
+            file_size = Path(filepath).stat().st_size
+            if file_size == 0:
+                await update.message.reply_text("❌ Generated document is empty. Please try again.")
+                return
+            
             with open(filepath, 'rb') as f:
                 await update.message.reply_document(document=f, filename=Path(filepath).name)
+            logger.info(f"Sent generated document: {filepath} (size: {file_size} bytes)")
         else:
             await update.message.reply_text("❌ Failed to generate document")
             
@@ -3348,9 +3355,14 @@ async def generate_pdf_command(update: Update, context: ContextTypes.DEFAULT_TYP
         doc_gen = get_document_generator()
         filepath = doc_gen.generate_pdf(user_message, title="Generated PDF")
         
-        if filepath:
+        if filepath and Path(filepath).exists():
+            file_size = Path(filepath).stat().st_size
+            if file_size == 0:
+                await update.message.reply_text("❌ Generated PDF is empty. Please try again.")
+                return
             with open(filepath, 'rb') as f:
                 await update.message.reply_document(document=f, filename=Path(filepath).name)
+            logger.info(f"Sent generated PDF: {filepath} (size: {file_size} bytes)")
         else:
             await update.message.reply_text("❌ Failed to generate PDF")
     except Exception as e:
@@ -3608,9 +3620,24 @@ async def use_template_command(update: Update, context: ContextTypes.DEFAULT_TYP
                 template_name=template_name
             )
         
-        if filepath:
-            with open(filepath, 'rb') as f:
-                await update.message.reply_document(document=f, filename=Path(filepath).name)
+        if filepath and Path(filepath).exists():
+            # Verify file is not empty
+            file_size = Path(filepath).stat().st_size
+            if file_size == 0:
+                await update.message.reply_text("❌ Generated file is empty. Please try again.")
+                return
+            
+            # Determine file type and send appropriately
+            file_ext = Path(filepath).suffix.lower()
+            if file_ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']:
+                # Send images as photos
+                with open(filepath, 'rb') as f:
+                    await update.message.reply_photo(photo=f, caption="✅ Generated from template")
+            else:
+                # Send documents as documents
+                with open(filepath, 'rb') as f:
+                    await update.message.reply_document(document=f, filename=Path(filepath).name)
+            logger.info(f"Sent generated file: {filepath} (size: {file_size} bytes)")
         else:
             await update.message.reply_text("❌ Failed to generate document from template")
             
@@ -5496,17 +5523,39 @@ If you believe this is an error, please contact support.
                     )
                     
                     if filepath and PathLib(filepath).exists():
-                        # Send the generated ID
-                        with open(filepath, 'rb') as f:
-                            await update.message.reply_document(
-                                document=f,
-                                filename=PathLib(filepath).name,
-                                caption=f"✅ **{state_display} ID Generated**\n\n"
-                                       f"Name: {user_data.get('name', 'N/A')}\n"
-                                       f"DOB: {user_data.get('dob', 'N/A')}\n"
-                                       f"Address: {user_data.get('address', 'N/A')}"
-                            )
-                        logger.info(f"Auto-generated and sent ID: {filepath}")
+                        # Verify file is not empty
+                        file_size = PathLib(filepath).stat().st_size
+                        if file_size == 0:
+                            logger.error(f"Generated ID file is empty: {filepath}")
+                            await update.message.reply_text("❌ Generated ID file is empty. Please try again.")
+                            return
+                        
+                        # Send the generated ID as photo (better display in Telegram)
+                        file_ext = PathLib(filepath).suffix.lower()
+                        if file_ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']:
+                            # Send as photo for better Telegram display
+                            with open(filepath, 'rb') as f:
+                                await update.message.reply_photo(
+                                    photo=f,
+                                    caption=f"✅ **{state_display} ID Generated**\n\n"
+                                           f"Name: {user_data.get('name', 'N/A')}\n"
+                                           f"DOB: {user_data.get('dob', 'N/A')}\n"
+                                           f"Address: {user_data.get('address', 'N/A')}",
+                                    parse_mode='Markdown'
+                                )
+                        else:
+                            # Send as document for non-image formats
+                            with open(filepath, 'rb') as f:
+                                await update.message.reply_document(
+                                    document=f,
+                                    filename=PathLib(filepath).name,
+                                    caption=f"✅ **{state_display} ID Generated**\n\n"
+                                           f"Name: {user_data.get('name', 'N/A')}\n"
+                                           f"DOB: {user_data.get('dob', 'N/A')}\n"
+                                           f"Address: {user_data.get('address', 'N/A')}",
+                                    parse_mode='Markdown'
+                                )
+                        logger.info(f"Auto-generated and sent ID: {filepath} (size: {file_size} bytes)")
                         
                         # Mark result as delivered in state
                         try:
