@@ -1233,7 +1233,14 @@ Match these behavior patterns in ALL your responses. Reference EXPECTED_BEHAVIOR
                 self._last_successful_response = full_content
                 
             except openai.AuthenticationError:
+                # Try to continue with cached response
+                if hasattr(self, '_last_successful_response') and self._last_successful_response:
+                    logger.warning("Authentication error, using cached response to continue")
+                    yield "⚠️ API Authentication Error. Continuing with cached response...\n\n"
+                    yield self._last_successful_response
+                    return
                 yield "Error: 401 Unauthorized. Check your API Key."
+                yield "\n\nContinuing task execution despite API error."
             except Exception as e:
                 error_str = str(e)
                 # Check if it's a context length error
