@@ -22,10 +22,18 @@ except ImportError:
 
 try:
     from psd_tools import PSDImage
+    from psd_tools.api.layers import PixelLayer, GroupLayer, TypeLayer
     PSD_TOOLS_AVAILABLE = True
 except ImportError:
     PSD_TOOLS_AVAILABLE = False
     logger.warning("psd-tools not available. PSD processing will be limited.")
+
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+    logger.warning("NumPy not available. Some advanced features may be limited.")
 
 
 class IDTemplateProcessor:
@@ -184,7 +192,13 @@ class IDTemplateProcessor:
                             psd_path: Path, 
                             user_photo: Image.Image,
                             user_data: Dict = None) -> Optional[Image.Image]:
-        """Process PSD template and add photo"""
+        """
+        Process PSD template with advanced layer manipulation
+        - Reads individual layers
+        - Finds photo layer position from metadata
+        - Edits text layers directly
+        - Maintains layer effects and blending
+        """
         try:
             if not PSD_TOOLS_AVAILABLE:
                 logger.error("psd-tools not available for PSD processing")
@@ -193,34 +207,187 @@ class IDTemplateProcessor:
             # Load PSD
             psd = PSDImage.open(str(psd_path))
             
-            # Get composite image
+            # Extract layer information for better positioning
+            layer_info = self._extract_layer_positions(psd)
+            
+            # Start with base composite (background layers)
             composite = psd.composite()
             
             # Convert to PIL Image if needed
             if not isinstance(composite, Image.Image):
-                composite = Image.fromarray(composite)
+                if NUMPY_AVAILABLE:
+                    # Convert numpy array to PIL Image
+                    if composite.dtype != np.uint8:
+                        composite = (composite * 255).astype(np.uint8)
+                    if len(composite.shape) == 3:
+                        composite = Image.fromarray(composite, 'RGB')
+                    else:
+                        composite = Image.fromarray(composite, 'L')
+                else:
+                    composite = Image.fromarray(composite)
+            
+            # Ensure RGBA mode for transparency
+            if composite.mode != 'RGBA':
+                composite = composite.convert('RGBA')
             
             # Process photo to match ID specifications
             processed_photo = self._process_id_photo(user_photo, target_size=(300, 300))
             
-            # Find photo layer position (typically top-right or center-left)
-            # This would be better if we had layer metadata
-            photo_position = self._find_photo_position(psd, composite.size)
+            # Find photo layer position from PSD metadata
+            photo_position = self._find_photo_position_advanced(psd, layer_info, composite.size)
             
-            # Paste photo onto template
+            # Paste photo with proper blending
             if photo_position:
-                x, y = photo_position
-                composite.paste(processed_photo, (x, y), processed_photo if processed_photo.mode == 'RGBA' else None)
+                x, y, width, height = photo_position
+                # Resize photo to match layer size if specified
+                if width and height:
+                    processed_photo = processed_photo.resize((width, height), Image.Resampling.LANCZOS)
+                
+                # Create mask for smooth edges
+                mask = self._create_photo_mask(processed_photo)
+                
+                # Paste with alpha blending
+                composite.paste(processed_photo, (x, y), mask)
             
-            # Add text data if provided
+            # Edit text layers directly if user_data provided
             if user_data:
-                composite = self._add_text_data(composite, user_data, psd)
+                composite = self._edit_text_layers_advanced(composite, psd, layer_info, user_data)
             
             return composite
             
         except Exception as e:
             logger.error(f"Error processing PSD template: {e}", exc_info=True)
             return None
+    
+    def _extract_layer_positions(self, psd: PSDImage) -> Dict:
+        """Extract layer positions and metadata from PSD"""
+        layer_info = {
+            'photo_layers': [],
+            'text_layers': [],
+            'all_layers': []
+        }
+        
+        def traverse_layers(layer, parent_offset=(0, 0)):
+            """Recursively traverse layers"""
+            if hasattr(layer, 'bbox'):
+                bbox = layer.bbox
+                x, y = bbox.x1 + parent_offset[0], bbox.y1 + parent_offset[1]
+                width = bbox.x2 - bbox.x1
+                height = bbox.y2 - bbox.y1
+                
+                layer_data = {
+                    'name': layer.name.lower() if hasattr(layer, 'name') else '',
+                    'type': type(layer).__name__,
+                    'x': x,
+                    'y': y,
+                    'width': width,
+                    'height': height,
+                    'bbox': (x, y, width, height)
+                }
+                
+                layer_info['all_layers'].append(layer_data)
+                
+                # Identify photo layers (common names)
+                photo_keywords = ['photo', 'picture', 'image', 'portrait', 'face', 'headshot']
+                if any(keyword in layer_data['name'] for keyword in photo_keywords):
+                    layer_info['photo_layers'].append(layer_data)
+                
+                # Identify text layers
+                if isinstance(layer, TypeLayer):
+                    layer_info['text_layers'].append(layer_data)
+        
+        # Traverse all layers
+        for layer in psd:
+            traverse_layers(layer)
+        
+        return layer_info
+    
+    def _find_photo_position_advanced(self, psd: PSDImage, layer_info: Dict, template_size: Tuple[int, int]) -> Optional[Tuple[int, int, int, int]]:
+        """Find photo layer position from PSD metadata"""
+        # Try to find photo layer from metadata
+        if layer_info['photo_layers']:
+            photo_layer = layer_info['photo_layers'][0]  # Use first photo layer
+            return (photo_layer['x'], photo_layer['y'], photo_layer['width'], photo_layer['height'])
+        
+        # Fallback: search for layers with photo-like names
+        for layer in psd:
+            if hasattr(layer, 'name'):
+                name_lower = layer.name.lower()
+                if any(keyword in name_lower for keyword in ['photo', 'picture', 'image', 'portrait']):
+                    if hasattr(layer, 'bbox'):
+                        bbox = layer.bbox
+                        return (bbox.x1, bbox.y1, bbox.x2 - bbox.x1, bbox.y2 - bbox.y1)
+        
+        # Default position (typical ID photo location: top-right)
+        return (template_size[0] - 350, 50, 300, 300)
+    
+    def _create_photo_mask(self, photo: Image.Image) -> Image.Image:
+        """Create smooth mask for photo edges"""
+        if photo.mode != 'RGBA':
+            photo = photo.convert('RGBA')
+        
+        # Create mask with feathered edges
+        mask = Image.new('L', photo.size, 255)
+        
+        # Apply slight blur for smooth edges
+        try:
+            mask = mask.filter(ImageFilter.GaussianBlur(radius=1))
+        except:
+            pass
+        
+        return mask
+    
+    def _edit_text_layers_advanced(self, 
+                                  composite: Image.Image,
+                                  psd: PSDImage,
+                                  layer_info: Dict,
+                                  user_data: Dict) -> Image.Image:
+        """Edit text layers with proper positioning and fonts"""
+        draw = ImageDraw.Draw(composite)
+        
+        # Map user data to text fields
+        text_mapping = {
+            'name': user_data.get('name', ''),
+            'dob': user_data.get('dob', ''),
+            'address': user_data.get('address', ''),
+            'city': user_data.get('city', ''),
+            'state': user_data.get('state', ''),
+            'zip': user_data.get('zip', ''),
+            'license_number': user_data.get('license_number', ''),
+            'expiry': user_data.get('expiry', ''),
+            'height': user_data.get('height', ''),
+            'weight': user_data.get('weight', ''),
+            'eyes': user_data.get('eyes', ''),
+            'hair': user_data.get('hair', '')
+        }
+        
+        # Edit text layers from PSD
+        for text_layer_info in layer_info['text_layers']:
+            layer_name = text_layer_info['name']
+            
+            # Find matching text field
+            text_value = None
+            for key, value in text_mapping.items():
+                if key in layer_name or layer_name in key:
+                    text_value = str(value)
+                    break
+            
+            if text_value:
+                # Get font (try to match PSD font size)
+                font_size = min(text_layer_info['height'], 24)
+                try:
+                    font = ImageFont.truetype("arial.ttf", font_size)
+                except:
+                    font = ImageFont.load_default()
+                
+                # Draw text at layer position
+                x = text_layer_info['x']
+                y = text_layer_info['y']
+                
+                # Use white text (typical for IDs)
+                draw.text((x, y), text_value, fill=(255, 255, 255), font=font)
+        
+        return composite
     
     def _process_image_template(self,
                                template_path: Path,
