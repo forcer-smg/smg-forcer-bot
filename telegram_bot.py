@@ -4853,6 +4853,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.debug(f"Empty message from user {user_id}, skipping")
         return
     
+    # RESTORE STATE: Check for pending tasks from previous session
+    try:
+        from user_state_manager import get_user_state_manager
+        from continuous_executor import get_continuous_executor
+        
+        state_mgr = get_user_state_manager(db)
+        continuous_exec = get_continuous_executor()
+        
+        # Check for pending task
+        pending_task = continuous_exec.check_and_resume_task(user_id)
+        if pending_task:
+            task_desc = pending_task.get('task_description', '')
+            # If user is asking about their work, restore context
+            if any(keyword in user_message.lower() for keyword in ['project', 'working', 'doing', 'id project', 'continue', 'resume']):
+                await update.message.reply_text(
+                    f"📋 **Resuming Previous Task:**\n\n"
+                    f"Task: {task_desc}\n"
+                    f"Status: {pending_task.get('status', 'pending')}\n"
+                    f"Expected Results: {', '.join(pending_task.get('expected_results', []))}\n\n"
+                    f"🔄 Continuing execution...",
+                    parse_mode='Markdown'
+                )
+                # Will continue with normal execution which should complete the task
+    except Exception as e:
+        logger.warning(f"Could not restore state: {e}")
+    
+    # RESTORE WORKSPACE STATE: Load current project info
+    try:
+        from user_state_manager import get_user_state_manager
+        state_mgr = get_user_state_manager(db)
+        current_project = state_mgr.get_current_project(user_id)
+        if current_project:
+            # Store in context for AI to use
+            context.user_data['current_project'] = current_project
+            logger.info(f"Restored current project for user {user_id}: {current_project.get('project_name')}")
+    except Exception as e:
+        logger.warning(f"Could not restore project state: {e}")
+    
     # Log user message for training data collection
     try:
         from datetime import datetime
@@ -5404,26 +5442,119 @@ You've used all your available requests.
                     logger.warning(f"Could not create progress streamer: {e}")
                     progress_streamer = None
                 
-                # Handle with concurrency management for 500+ users
-                if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
-                    async def process_message():
-                        return await desktop_handler.handle_with_streaming(
+                # CONTINUOUS EXECUTION: Keep executing until results are delivered
+                try:
+                    from continuous_executor import get_continuous_executor
+                    from user_state_manager import get_user_state_manager
+                    
+                    continuous_exec = get_continuous_executor(max_iterations=5, check_interval=3.0)
+                    state_mgr = get_user_state_manager(db)
+                    
+                    # Determine expected results based on task
+                    expected_results = []
+                    message_lower = user_message.lower()
+                    if 'id' in message_lower or 'driver' in message_lower or 'license' in message_lower:
+                        expected_results = ['id_image', 'file']
+                    elif 'generate' in message_lower or 'create' in message_lower:
+                        expected_results = ['file', 'script']
+                    elif 'scan' in message_lower or 'check' in message_lower:
+                        expected_results = ['file', 'report']
+                    else:
+                        expected_results = ['message']  # At minimum, expect a response message
+                    
+                    # Save current project if detected
+                    if 'project' in message_lower or 'working' in message_lower:
+                        # Try to detect project name
+                        project_name = f"user_{user_id}_project_{int(time.time())}"
+                        state_mgr.save_current_project(user_id, project_name, 'general', workspace)
+                    
+                    # Execute with continuous checking
+                    async def execute_task():
+                        if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
+                            async def process_message():
+                                return await desktop_handler.handle_with_streaming(
+                                    user_message,
+                                    update,
+                                    context
+                                )
+                            
+                            return await concurrency_manager.process_request(
+                                user_id,
+                                process_message
+                            )
+                        else:
+                            return await desktop_handler.handle_with_streaming(
+                                user_message,
+                                update,
+                                context
+                            )
+                    
+                    async def check_results(exec_result, expected, ws_path):
+                        """Check if results were delivered"""
+                        results = []
+                        
+                        # Check for files in workspace
+                        if ws_path and Path(ws_path).exists():
+                            workspace = Path(ws_path)
+                            
+                            # Check for ID images
+                            if 'id_image' in expected:
+                                id_files = list(workspace.rglob('*id*.png')) + list(workspace.rglob('*texas*.png'))
+                                if id_files:
+                                    results.append({'type': 'id_image', 'path': str(id_files[0])})
+                            
+                            # Check for generated files
+                            if 'file' in expected:
+                                py_files = list(workspace.rglob('*.py'))
+                                json_files = list(workspace.rglob('*.json'))
+                                if py_files or json_files:
+                                    results.append({'type': 'file', 'path': str(py_files[0] if py_files else json_files[0])})
+                        
+                        # Check if response was sent (basic check)
+                        if 'message' in expected and exec_result:
+                            results.append({'type': 'message', 'content': exec_result[:100]})
+                        
+                        return results
+                    
+                    # Execute continuously until results delivered
+                    exec_result = await continuous_exec.execute_until_delivered(
+                        task_description=user_message,
+                        execution_function=execute_task,
+                        expected_results=expected_results,
+                        result_checker=check_results,
+                        user_id=user_id,
+                        workspace_path=workspace
+                    )
+                    
+                    cleaned_response = exec_result.get('execution_result', '')
+                    delivered = exec_result.get('delivered_results', [])
+                    
+                    if exec_result.get('success'):
+                        logger.info(f"Task completed successfully: {len(delivered)} results delivered")
+                    else:
+                        logger.warning(f"Task may not be complete: {exec_result.get('message', 'Unknown')}")
+                    
+                except Exception as e:
+                    logger.warning(f"Continuous execution not available, using standard execution: {e}")
+                    # Fallback to standard execution
+                    if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
+                        async def process_message():
+                            return await desktop_handler.handle_with_streaming(
+                                user_message,
+                                update,
+                                context
+                            )
+                        
+                        cleaned_response = await concurrency_manager.process_request(
+                            user_id,
+                            process_message
+                        )
+                    else:
+                        cleaned_response = await desktop_handler.handle_with_streaming(
                             user_message,
                             update,
                             context
                         )
-                    
-                    cleaned_response = await concurrency_manager.process_request(
-                        user_id,
-                        process_message
-                    )
-                else:
-                    # Fallback without concurrency management
-                    cleaned_response = await desktop_handler.handle_with_streaming(
-                        user_message,
-                        update,
-                        context
-                    )
                 
                 # Update task results if available
                 if hasattr(desktop_handler, 'last_task_results'):
@@ -5481,6 +5612,27 @@ You've used all your available requests.
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
                 logger.info(f"Cleanup complete for user {user_id}")
+            
+            # SAVE STATE: Save current task state before sending results
+            try:
+                from user_state_manager import get_user_state_manager
+                from datetime import datetime
+                state_mgr = get_user_state_manager(db)
+                
+                # Save last task description
+                if 'last_task_description' in context.user_data:
+                    state_mgr.save_state(
+                        user_id,
+                        'last_task',
+                        {
+                            'description': context.user_data.get('last_task_description'),
+                            'response': cleaned_response[:500] if cleaned_response else '',
+                            'timestamp': datetime.now().isoformat()
+                        },
+                        workspace
+                    )
+            except Exception as e:
+                logger.warning(f"Could not save task state: {e}")
             
             # Send screenshots if any
             screenshots = context.user_data.get('screenshots', [])
