@@ -4562,27 +4562,32 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             brain = get_user_brain(user_id)
             
             if handler_available:
-                workspace = os.path.join(os.getcwd(), f"user_{user_id}")
-                os.makedirs(workspace, exist_ok=True)
-                desktop_handler = DesktopAIHandler(brain, workspace_root=workspace, user_id=user_id)
-                result = await desktop_handler.process_image(image_path, caption)
-                
-                if result.get('success'):
-                    response_text = result.get('result', 'Image processed successfully')
-                    await update.message.reply_text(f"🖼️ **Image Analysis:**\n\n{response_text}", parse_mode='Markdown')
-                    vision_processed = True
-                else:
-                    error = result.get('error', 'Unknown error')
-                    # Don't fail completely - photo is saved for ID generation
-                    if 'No vision models' in error or 'all failed' in error.lower():
-                        await update.message.reply_text(
-                            f"📸 **Photo saved!**\n\n"
-                            f"ℹ️ Vision analysis is optional (no API keys needed for ID generation).\n"
-                            f"✅ Photo is ready for ID generation.\n\n"
-                            f"Send your name, DOB, and address to generate your Texas ID."
-                        )
+                try:
+                    workspace = os.path.join(os.getcwd(), f"user_{user_id}")
+                    os.makedirs(workspace, exist_ok=True)
+                    desktop_handler = DesktopAIHandler(brain, workspace_root=workspace, user_id=user_id)
+                    # Add timeout to prevent hanging
+                    import asyncio
+                    result = await asyncio.wait_for(
+                        desktop_handler.process_image(image_path, caption),
+                        timeout=30.0  # 30 second timeout
+                    )
+                    
+                    if result.get('success'):
+                        response_text = result.get('result', 'Image processed successfully')
+                        # Send analysis as separate message (photo already confirmed)
+                        await update.message.reply_text(f"🖼️ **Image Analysis:**\n\n{response_text}", parse_mode='Markdown')
+                        vision_processed = True
                     else:
-                        await update.message.reply_text(f"⚠️ **Vision analysis failed:**\n{error}\n\n✅ Photo saved for ID generation.")
+                        error = result.get('error', 'Unknown error')
+                        # Don't send another message - photo already confirmed above
+                        logger.info(f"Vision analysis failed: {error}")
+                except asyncio.TimeoutError:
+                    logger.warning("Vision processing timed out after 30 seconds")
+                    # Photo already confirmed, no need to send another message
+                except Exception as e:
+                    logger.warning(f"Vision processing error: {e}")
+                    # Photo already confirmed, no need to send another message
             else:
                 # Fallback: use vision processor directly with timeout
                 try:
