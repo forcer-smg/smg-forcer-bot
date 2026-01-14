@@ -315,8 +315,7 @@ class AIResponseParser:
                 return True
         
         # Skip text that's just a label/header (no actual command)
-        if ':' in text and not any(char in text for char in ['/', '\\', '$', '`', '(', ')', '[', ']', '{', '}']):
-            # Might be a label, but check if it's actually a command
+        if ':' in text:
             parts = text.split(':')
             if len(parts) == 2:
                 label = parts[0].strip().lower()
@@ -326,8 +325,26 @@ class AIResponseParser:
                     return True
                 # If label looks like an instruction field
                 if label in ['full name', 'date of birth', 'address', 'license number', 'issue date', 
-                            'expiration date', 'height', 'weight', 'eye color', 'sex', 'name', 'dob']:
+                            'expiration date', 'height', 'weight', 'eye color', 'sex', 'name', 'dob',
+                            'license', 'issue', 'expiration', 'eye', 'full', 'date']:
                     return True
+                # If it's just a label without any executable content
+                if not any(char in value for char in ['/', '\\', '$', '`', '(', ')', '[', ']', '{', '}', 
+                                                       'python', 'bash', 'sh', 'cd', 'find', 'grep', 'ls', 
+                                                       'cat', 'echo', 'wget', 'curl', 'mkdir', 'touch']):
+                    # Check if label is an instruction field
+                    if any(keyword in label for keyword in ['name', 'address', 'date', 'birth', 'license', 
+                                                           'issue', 'expiration', 'height', 'weight', 'eye', 
+                                                           'color', 'sex', 'dob']):
+                        return True
+        
+        # Skip single words that aren't commands (like "fi", "end", etc. without context)
+        if len(text.split()) == 1 and text_lower not in ['cd', 'ls', 'pwd', 'cat', 'echo', 'grep', 'find', 
+                                                          'mkdir', 'rm', 'mv', 'cp', 'chmod', 'python', 'bash']:
+            # Single word that's not a common command - likely not executable
+            if text_lower in ['fi', 'end', 'done', 'then', 'else', 'elif', 'if', 'for', 'while', 'def', 
+                             'class', 'import', 'from', 'return', 'break', 'continue', 'pass', 'yield']:
+                return True
         
         return False
     
