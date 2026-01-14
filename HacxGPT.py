@@ -1282,6 +1282,8 @@ Match these behavior patterns in ALL your responses. Reference EXPECTED_BEHAVIOR
                                     full_content += content
                                     yield content
                             self.history.append({"role": "assistant", "content": full_content})
+                            # Cache successful response for error recovery
+                            self._last_successful_response = full_content
                             logger.info(f"Successfully recovered from context length error after {retry_attempt + 1} retry")
                             return  # Success after truncation
                         except Exception as retry_error:
