@@ -3347,13 +3347,49 @@ async def use_template_command(update: Update, context: ContextTypes.DEFAULT_TYP
             except Exception as e:
                 logger.warning(f"Could not process template: {e}")
         
-        doc_gen = get_document_generator()
-        filepath = doc_gen.generate_from_template(
-            template['template_data'],
-            doc_type=template['type'],
-            variables={},  # Can be enhanced to accept variables
-            template_name=template_name
-        )
+        # Check if this is an ID template request with photo
+        template_data = template.get('template_data', {})
+        template_file_path = template_data.get('file_path')
+        
+        # Check if user uploaded a photo (in context)
+        user_photo = None
+        if context.user_data.get('last_photo'):
+            user_photo = context.user_data.get('last_photo')
+        
+        # If it's an ID template and we have a photo, use ID processor
+        if template_name and 'id' in template_name.lower() and user_photo:
+            try:
+                from id_template_processor import get_id_processor
+                id_processor = get_id_processor()
+                
+                # Extract user data from message if provided
+                user_data = {}
+                message_text = update.message.text or ""
+                if message_text:
+                    # Try to extract data from message
+                    import re
+                    if 'name' in message_text.lower():
+                        name_match = re.search(r'name[:\s]+([^\n,]+)', message_text, re.I)
+                        if name_match:
+                            user_data['name'] = name_match.group(1).strip()
+                
+                filepath = id_processor.process_texas_id_with_photo(
+                    user_photo,
+                    template_name=template_name,
+                    user_data=user_data
+                )
+            except Exception as e:
+                logger.warning(f"ID processor not available, using document generator: {e}")
+                filepath = None
+        else:
+            # Use regular document generator
+            doc_gen = get_document_generator()
+            filepath = doc_gen.generate_from_template(
+                template['template_data'],
+                doc_type=template['type'],
+                variables={},  # Can be enhanced to accept variables
+                template_name=template_name
+            )
         
         if filepath:
             with open(filepath, 'rb') as f:
