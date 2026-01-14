@@ -3487,6 +3487,23 @@ async def download_template_command(update: Update, context: ContextTypes.DEFAUL
                 return
         
         if file_path:
+            # Process template for AI use (extract PSD layers, etc.)
+            template_processed = False
+            try:
+                from template_processor import get_template_processor
+                processor = get_template_processor()
+                processed_info = processor.process_template(file_path, template_name)
+                if processed_info:
+                    template_processed = True
+                    await update.message.reply_text(
+                        f"🔧 Processing template...\n"
+                        f"📊 Extracted {processed_info.get('layer_count', 0)} layers\n"
+                        f"📝 Found {processed_info.get('text_layer_count', 0)} editable text fields",
+                        parse_mode='Markdown'
+                    )
+            except Exception as e:
+                logger.warning(f"Could not process template: {e}")
+            
             # Save to template database
             from template_manager import get_template_manager
             template_mgr = get_template_manager(db)
@@ -3510,25 +3527,28 @@ async def download_template_command(update: Update, context: ContextTypes.DEFAUL
             else:
                 source = 'direct'
             
+            final_template_name = template_name or (Path(file_path).stem if file_path else f"template_{int(time.time())}")
+            
             template_id = template_mgr.save_template(
                 user_id=user_id,
-                name=template_name or (Path(file_path).stem if file_path else f"template_{int(time.time())}"),
+                name=final_template_name,
                 template_type=template_type,
-                template_data={'file_path': file_path, 'source_url': url, 'source': source},
+                template_data={'file_path': file_path, 'source_url': url, 'source': source, 'processed': template_processed},
                 category='downloaded',
-                description=f"Downloaded from {source}",
+                description=f"Downloaded from {source}" + (" (Processed for AI)" if template_processed else ""),
                 source_url=url,
                 file_path=file_path
             )
             
             if template_id:
-                await update.message.reply_text(
-                    f"✅ Template downloaded and saved!\n\n"
-                    f"📁 File: `{Path(file_path).name}`\n"
-                    f"💾 Template ID: `{template_id}`\n"
-                    f"📋 Use with: `/use_template {template_name or Path(file_path).stem}`",
-                    parse_mode='Markdown'
-                )
+                status_msg = f"✅ Template downloaded and saved!\n\n"
+                status_msg += f"📁 File: `{Path(file_path).name}`\n"
+                status_msg += f"💾 Template ID: `{template_id}`\n"
+                if template_processed:
+                    status_msg += f"🤖 AI-ready: Template processed and ready for generation\n"
+                status_msg += f"📋 Use with: `/use_template {final_template_name}`"
+                
+                await update.message.reply_text(status_msg, parse_mode='Markdown')
             else:
                 await update.message.reply_text(
                     f"✅ Template downloaded: `{file_path}`\n\n"
