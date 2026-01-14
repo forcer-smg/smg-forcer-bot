@@ -423,14 +423,179 @@ class CodeValidator:
         
         elif language == 'bash':
             # Check for unquoted variables
-            if re.search(r'\$\w+[^"]', code):
+            if re.search(r'\$\w+[^"\'`]', code):
                 metrics['security_issues'].append({
                     'severity': 'medium',
-                    'message': 'Unquoted variables can cause word splitting',
+                    'message': 'Unquoted variables can cause word splitting and pathname expansion',
                     'pattern': r'\$\w+'
                 })
+            
+            # Check for command injection risks
+            if re.search(r'\$\(.*\$', code) or re.search(r'`.*\$', code):
+                metrics['security_issues'].append({
+                    'severity': 'high',
+                    'message': 'Nested command substitution can be dangerous',
+                    'pattern': 'nested command substitution'
+                })
+        
+        elif language == 'javascript' or language == 'typescript':
+            dangerous_patterns = [
+                (r'eval\(', 'high', 'Use of eval() is dangerous'),
+                (r'Function\(', 'high', 'Function constructor can execute arbitrary code'),
+                (r'innerHTML\s*=', 'medium', 'innerHTML can lead to XSS attacks'),
+                (r'document\.write\(', 'low', 'document.write() can lead to XSS'),
+            ]
+            
+            for pattern, severity, message in dangerous_patterns:
+                if re.search(pattern, code):
+                    metrics['security_issues'].append({
+                        'severity': severity,
+                        'message': message,
+                        'pattern': pattern
+                    })
         
         return metrics
+    
+    def _calculate_complexity(self, code: str, language: str) -> str:
+        """Calculate code complexity (simplified)"""
+        # Count control flow statements
+        complexity_keywords = {
+            'python': ['if', 'elif', 'else', 'for', 'while', 'try', 'except', 'with'],
+            'bash': ['if', 'elif', 'else', 'for', 'while', 'case'],
+            'javascript': ['if', 'else', 'for', 'while', 'switch', 'try', 'catch'],
+            'go': ['if', 'else', 'for', 'switch', 'select'],
+            'rust': ['if', 'else', 'for', 'while', 'match', 'loop']
+        }
+        
+        keywords = complexity_keywords.get(language, [])
+        complexity_count = sum(code.count(f' {kw} ') + code.count(f' {kw}(') for kw in keywords)
+        
+        if complexity_count < 5:
+            return 'low'
+        elif complexity_count < 15:
+            return 'medium'
+        else:
+            return 'high'
+    
+    def _check_security(self, code: str, language: str) -> List[Dict]:
+        """Check for security issues"""
+        issues = []
+        
+        if language == 'python':
+            dangerous_patterns = [
+                (r'eval\(', 'high', 'Use of eval() is dangerous - can execute arbitrary code'),
+                (r'exec\(', 'high', 'Use of exec() is dangerous - can execute arbitrary code'),
+                (r'__import__\(', 'medium', 'Dynamic imports can be dangerous'),
+                (r'subprocess\.call\(.*shell=True', 'high', 'Shell injection risk - avoid shell=True'),
+                (r'subprocess\.Popen\(.*shell=True', 'high', 'Shell injection risk - avoid shell=True'),
+                (r'os\.system\(', 'high', 'os.system() is dangerous - use subprocess instead'),
+                (r'pickle\.loads\(', 'high', 'Unpickling untrusted data is dangerous'),
+                (r'yaml\.load\(', 'medium', 'yaml.load() can execute code - use yaml.safe_load()'),
+                (r'input\(', 'low', 'User input should be validated'),
+            ]
+            
+            for pattern, severity, message in dangerous_patterns:
+                if re.search(pattern, code):
+                    issues.append({
+                        'severity': severity,
+                        'message': message,
+                        'pattern': pattern
+                    })
+        
+        elif language == 'bash':
+            # Check for unquoted variables
+            if re.search(r'\$\w+[^"\'`]', code):
+                issues.append({
+                    'severity': 'medium',
+                    'message': 'Unquoted variables can cause word splitting and pathname expansion',
+                    'pattern': r'\$\w+'
+                })
+            
+            # Check for command injection risks
+            if re.search(r'\$\(.*\$', code) or re.search(r'`.*\$', code):
+                issues.append({
+                    'severity': 'high',
+                    'message': 'Nested command substitution can be dangerous',
+                    'pattern': 'nested command substitution'
+                })
+        
+        elif language == 'javascript' or language == 'typescript':
+            dangerous_patterns = [
+                (r'eval\(', 'high', 'Use of eval() is dangerous'),
+                (r'Function\(', 'high', 'Function constructor can execute arbitrary code'),
+                (r'innerHTML\s*=', 'medium', 'innerHTML can lead to XSS attacks'),
+                (r'document\.write\(', 'low', 'document.write() can lead to XSS'),
+            ]
+            
+            for pattern, severity, message in dangerous_patterns:
+                if re.search(pattern, code):
+                    issues.append({
+                        'severity': severity,
+                        'message': message,
+                        'pattern': pattern
+                    })
+        
+        return issues
+    
+    def _check_performance(self, code: str, language: str) -> List[Dict]:
+        """Check for performance issues"""
+        issues = []
+        
+        if language == 'python':
+            # Check for inefficient patterns
+            if re.search(r'\.append\(.*\)\s+in\s+.*for', code, re.DOTALL):
+                issues.append({
+                    'severity': 'low',
+                    'message': 'Consider using list comprehension instead of append in loop',
+                    'pattern': 'append in loop'
+                })
+            
+            if re.search(r'for\s+\w+\s+in\s+range\(len\(', code):
+                issues.append({
+                    'severity': 'low',
+                    'message': 'Consider using enumerate() instead of range(len())',
+                    'pattern': 'range(len())'
+                })
+        
+        return issues
+    
+    def _check_best_practices(self, code: str, language: str) -> List[Dict]:
+        """Check for best practices violations"""
+        issues = []
+        
+        if language == 'python':
+            # Check for missing docstrings in functions
+            functions = re.findall(r'def\s+(\w+)\s*\([^)]*\):', code)
+            for func in functions:
+                func_def_match = re.search(rf'def\s+{func}\s*\([^)]*\):', code)
+                if func_def_match:
+                    func_start = func_def_match.end()
+                    next_line = code[func_start:func_start+20].strip()
+                    if not next_line.startswith('"""') and not next_line.startswith("'''"):
+                        issues.append({
+                            'severity': 'low',
+                            'message': f'Function {func} should have a docstring',
+                            'pattern': 'missing docstring'
+                        })
+            
+            # Check for bare except
+            if re.search(r'except\s*:', code):
+                issues.append({
+                    'severity': 'medium',
+                    'message': 'Bare except clause - specify exception type',
+                    'pattern': 'bare except'
+                })
+        
+        elif language == 'bash':
+            # Check for missing shebang
+            if not code.startswith('#!/'):
+                issues.append({
+                    'severity': 'low',
+                    'message': 'Script should start with shebang (#!/bin/bash)',
+                    'pattern': 'missing shebang'
+                })
+        
+        return issues
 
 
 # Global instance
