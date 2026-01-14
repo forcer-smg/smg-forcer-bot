@@ -2,10 +2,13 @@
 """
 Progress Streamer - Stream status updates for long-running tasks
 Provides periodic updates (10-30 seconds) during task execution
+Handles Telegram API timeouts and rate limits gracefully
+Supports long-running tasks (hours, not just minutes) with checkpointing
 """
 
 import time
 import logging
+import asyncio
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 
@@ -13,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class ProgressStreamer:
-    """Stream progress updates for long-running tasks"""
+    """Stream progress updates for long-running tasks with Telegram API resilience"""
     
     def __init__(self, update=None, context=None, update_interval: int = 15):
         """
@@ -36,6 +39,19 @@ class ProgressStreamer:
         self.details = []
         self.last_message = None
         self.enabled = True
+        
+        # Telegram API resilience
+        try:
+            from telegram_rate_limiter import get_telegram_rate_limiter
+            self.rate_limiter = get_telegram_rate_limiter()
+        except ImportError:
+            self.rate_limiter = None
+            logger.warning("Telegram rate limiter not available")
+        
+        # Checkpointing for long-running tasks
+        self.checkpoints = []
+        self.last_checkpoint_time = None
+        self.checkpoint_interval = 300  # 5 minutes
         
     def set_task_info(self, task_name: str, estimated_duration: int = None):
         """Set task information"""
@@ -67,6 +83,7 @@ class ProgressStreamer:
     async def send_progress_update(self, force: bool = False) -> bool:
         """
         Send progress update if interval has passed
+        Handles Telegram API timeouts and rate limits gracefully
         
         Args:
             force: Force update even if interval hasn't passed
@@ -88,20 +105,61 @@ class ProgressStreamer:
             # Build progress message
             message = self._build_progress_message()
             
-            # Send update
-            if self.last_message:
-                # Try to edit existing message
+            # Use rate limiter if available
+            if self.rate_limiter:
                 try:
-                    await self.last_message.edit_text(message, parse_mode='Markdown')
+                    # Wait if needed to avoid rate limit
+                    await self.rate_limiter.wait_if_needed()
+                    
+                    # Send with retry
+                    if self.last_message:
+                        # Try to edit existing message with retry
+                        async def edit_message():
+                            try:
+                                await self.last_message.edit_text(message, parse_mode='Markdown')
+                            except Exception as e:
+                                # If edit fails, send new message
+                                logger.debug(f"Could not edit progress message: {e}")
+                                self.last_message = await self.update.message.reply_text(message, parse_mode='Markdown')
+                        
+                        await self.rate_limiter.send_with_retry(edit_message, max_retries=2)
+                    else:
+                        # Send first message with retry
+                        async def send_message():
+                            return await self.update.message.reply_text(message, parse_mode='Markdown')
+                        
+                        self.last_message = await self.rate_limiter.send_with_retry(send_message, max_retries=2)
+                    
+                    # Record message sent
+                    if self.rate_limiter:
+                        self.rate_limiter.record_message_sent()
+                    
                 except Exception as e:
-                    # If edit fails, send new message
-                    logger.debug(f"Could not edit progress message: {e}")
-                    self.last_message = await self.update.message.reply_text(message, parse_mode='Markdown')
+                    logger.warning(f"Error sending progress update (with rate limiter): {e}")
+                    # Fallback to direct send
+                    if self.last_message:
+                        try:
+                            await self.last_message.edit_text(message, parse_mode='Markdown')
+                        except:
+                            self.last_message = await self.update.message.reply_text(message, parse_mode='Markdown')
+                    else:
+                        self.last_message = await self.update.message.reply_text(message, parse_mode='Markdown')
             else:
-                # Send first message
-                self.last_message = await self.update.message.reply_text(message, parse_mode='Markdown')
+                # Fallback: direct send without rate limiter
+                if self.last_message:
+                    try:
+                        await self.last_message.edit_text(message, parse_mode='Markdown')
+                    except Exception as e:
+                        logger.debug(f"Could not edit progress message: {e}")
+                        self.last_message = await self.update.message.reply_text(message, parse_mode='Markdown')
+                else:
+                    self.last_message = await self.update.message.reply_text(message, parse_mode='Markdown')
             
             self.last_update = current_time
+            
+            # Save checkpoint for long-running tasks
+            self._save_checkpoint()
+            
             return True
             
         except Exception as e:
@@ -185,6 +243,46 @@ class ProgressStreamer:
     def enable(self):
         """Enable progress streaming"""
         self.enabled = True
+    
+    def _save_checkpoint(self):
+        """Save checkpoint for long-running task resumability"""
+        current_time = time.time()
+        
+        # Only checkpoint every N minutes (to avoid too many checkpoints)
+        if self.last_checkpoint_time and (current_time - self.last_checkpoint_time) < self.checkpoint_interval:
+            return
+        
+        checkpoint = {
+            'timestamp': current_time,
+            'step': self.current_step,
+            'progress_pct': self.progress_pct,
+            'results_count': self.results_count,
+            'elapsed_time': current_time - (self.task_start_time or self.start_time),
+            'details': self.details[-5:]  # Last 5 details
+        }
+        
+        self.checkpoints.append(checkpoint)
+        self.last_checkpoint_time = current_time
+        
+        # Keep only last 20 checkpoints
+        if len(self.checkpoints) > 20:
+            self.checkpoints = self.checkpoints[-20:]
+        
+        logger.debug(f"Checkpoint saved: {self.current_step} ({self.progress_pct}%)")
+    
+    def get_latest_checkpoint(self) -> Optional[Dict[str, Any]]:
+        """Get latest checkpoint for resumability"""
+        if self.checkpoints:
+            return self.checkpoints[-1]
+        return None
+    
+    def restore_from_checkpoint(self, checkpoint: Dict[str, Any]):
+        """Restore progress from checkpoint"""
+        self.current_step = checkpoint.get('step', 'Initializing')
+        self.progress_pct = checkpoint.get('progress_pct', 0)
+        self.results_count = checkpoint.get('results_count', 0)
+        self.details = checkpoint.get('details', [])
+        logger.info(f"Progress restored from checkpoint: {self.current_step} ({self.progress_pct}%)")
 
 
 def create_progress_streamer(update=None, context=None, update_interval: int = 15) -> ProgressStreamer:

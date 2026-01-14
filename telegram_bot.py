@@ -5819,26 +5819,183 @@ You've used all your available requests.
                         project_name = f"user_{user_id}_project_{int(time.time())}"
                         state_mgr.save_current_project(user_id, project_name, 'general', workspace)
                     
-                    # Execute with continuous checking
+                    # Execute with continuous checking and command execution
                     async def execute_task():
-                        if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
-                            async def process_message():
-                                return await desktop_handler.handle_with_streaming(
+                        """Execute task with automatic command execution (Cursor-style)"""
+                        try:
+                            # Import command execution modules
+                            from command_executor import get_command_executor
+                            from ai_response_parser import get_ai_response_parser
+                            from auto_retry_manager import get_auto_retry_manager
+                            from telegram_rate_limiter import get_telegram_rate_limiter
+                            
+                            command_executor = get_command_executor(workspace)
+                            response_parser = get_ai_response_parser()
+                            retry_manager = get_auto_retry_manager()
+                            rate_limiter = get_telegram_rate_limiter()
+                            
+                            # Get initial AI response
+                            if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
+                                async def process_message():
+                                    return await desktop_handler.handle_with_streaming(
+                                        user_message,
+                                        update,
+                                        context
+                                    )
+                                
+                                ai_response = await concurrency_manager.process_request(
+                                    user_id,
+                                    process_message
+                                )
+                            else:
+                                ai_response = await desktop_handler.handle_with_streaming(
                                     user_message,
                                     update,
                                     context
                                 )
                             
-                            return await concurrency_manager.process_request(
-                                user_id,
-                                process_message
-                            )
-                        else:
-                            return await desktop_handler.handle_with_streaming(
-                                user_message,
-                                update,
-                                context
-                            )
+                            # Parse AI response for commands
+                            parsed = response_parser.parse_ai_response(ai_response)
+                            
+                            # If no commands, return response as-is
+                            if not parsed['commands']:
+                                logger.debug("No commands found in AI response")
+                                return ai_response
+                            
+                            # Execute commands automatically
+                            logger.info(f"Found {len(parsed['commands'])} commands in AI response, executing...")
+                            
+                            execution_results = []
+                            conversation_context = user_message
+                            max_iterations = 10
+                            iteration = 0
+                            
+                            while iteration < max_iterations:
+                                iteration += 1
+                                
+                                # Update progress
+                                if progress_streamer:
+                                    progress_streamer.update_progress(
+                                        f"Executing commands (iteration {iteration}/{max_iterations})",
+                                        progress_pct=int((iteration / max_iterations) * 50),
+                                        details=f"Found {len(parsed['commands'])} commands"
+                                    )
+                                    await progress_streamer.send_progress_update()
+                                
+                                # Execute all commands
+                                for i, command in enumerate(parsed['commands'], 1):
+                                    logger.info(f"Executing command {i}/{len(parsed['commands'])}: {command}")
+                                    
+                                    # Execute with retry
+                                    max_retries = 3
+                                    executed = False
+                                    
+                                    for attempt in range(max_retries):
+                                        result = command_executor.execute_command(
+                                            command,
+                                            cwd=workspace,
+                                            timeout=300,
+                                            verify=True
+                                        )
+                                        
+                                        execution_results.append(result)
+                                        
+                                        # Check if verified (actually ran)
+                                        if result.get('verified', False) and result.get('success', False):
+                                            executed = True
+                                            logger.info(f"Command {i} executed and verified: {command}")
+                                            break
+                                        else:
+                                            # Try alternative
+                                            if attempt < max_retries - 1:
+                                                error_msg = result.get('error', '') or result.get('stderr', '') or 'Verification failed'
+                                                alt_command = retry_manager.retry_with_alternative(command, error_msg, attempt + 1)
+                                                if alt_command and alt_command != command:
+                                                    logger.info(f"Trying alternative: {alt_command}")
+                                                    command = alt_command
+                                                await asyncio.sleep(1)
+                                    
+                                    if not executed:
+                                        logger.warning(f"Command {i} failed after {max_retries} attempts: {command}")
+                                
+                                # Format results for AI
+                                results_summary = "\n".join([
+                                    f"Command: {r['command']}\n"
+                                    f"Exit code: {r.get('exit_code', 'N/A')}\n"
+                                    f"Output: {r.get('stdout', '')[:500]}\n"
+                                    f"Error: {r.get('stderr', '')[:200]}\n"
+                                    f"Verified: {'Yes' if r.get('verified', False) else 'No'}\n"
+                                    for r in execution_results[-len(parsed['commands']):]
+                                ])
+                                
+                                # Check if task complete
+                                if parsed['is_complete']:
+                                    logger.info("Task marked as complete by AI")
+                                    break
+                                
+                                # Feed results back to AI and get next response
+                                next_prompt = f"""Previous commands executed. Results:
+{results_summary}
+
+Continue with next steps. If task is complete, say "Task complete"."""
+                                
+                                # Get next AI response
+                                try:
+                                    next_response = ""
+                                    for chunk in brain.chat(next_prompt):
+                                        next_response += chunk
+                                    
+                                    # Parse next response
+                                    parsed = response_parser.parse_ai_response(next_response)
+                                    
+                                    # If no more commands and task complete, break
+                                    if not parsed['commands'] and parsed['is_complete']:
+                                        logger.info("Task complete (no more commands)")
+                                        break
+                                    
+                                    # If no more commands but not complete, wait a bit and check again
+                                    if not parsed['commands']:
+                                        await asyncio.sleep(2)
+                                        # Try one more time
+                                        final_response = ""
+                                        for chunk in brain.chat("Are there any more commands to execute? If task is complete, say 'Task complete'."):
+                                            final_response += chunk
+                                        final_parsed = response_parser.parse_ai_response(final_response)
+                                        if final_parsed['is_complete'] or not final_parsed['commands']:
+                                            break
+                                    
+                                except Exception as e:
+                                    logger.error(f"Error getting next AI response: {e}", exc_info=True)
+                                    break
+                                
+                                # Brief delay
+                                await asyncio.sleep(1)
+                            
+                            # Return final response with execution summary
+                            final_summary = f"{ai_response}\n\n**Commands Executed:** {len(execution_results)}\n**Verified:** {sum(1 for r in execution_results if r.get('verified', False))}"
+                            return final_summary
+                            
+                        except Exception as e:
+                            logger.error(f"Error in command execution: {e}", exc_info=True)
+                            # Fallback to standard execution
+                            if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
+                                async def process_message():
+                                    return await desktop_handler.handle_with_streaming(
+                                        user_message,
+                                        update,
+                                        context
+                                    )
+                                
+                                return await concurrency_manager.process_request(
+                                    user_id,
+                                    process_message
+                                )
+                            else:
+                                return await desktop_handler.handle_with_streaming(
+                                    user_message,
+                                    update,
+                                    context
+                                )
                     
                     async def check_results(exec_result, expected, ws_path):
                         """Check if results were delivered"""
