@@ -4535,10 +4535,20 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"Could not save photo to state: {e}")
         
+        # Send immediate confirmation that photo is saved
+        await update.message.reply_text(
+            f"📸 **Photo received and saved!**\n\n"
+            f"✅ Photo is ready for ID generation.\n\n"
+            f"Send your details:\n"
+            f"• Name: [Your Name]\n"
+            f"• DOB: [MM/DD/YYYY]\n"
+            f"• Address: [Your Address]"
+        )
+        
         # Get caption or use default
         caption = update.message.caption or "What is in this image? Describe it in detail."
         
-        # Process image with vision models (optional - photo is already saved)
+        # Process image with vision models (optional - photo is already saved, run in background)
         vision_processed = False
         try:
             # Try to use DesktopAIHandler, fallback to vision_processor
@@ -4574,26 +4584,31 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else:
                         await update.message.reply_text(f"⚠️ **Vision analysis failed:**\n{error}\n\n✅ Photo saved for ID generation.")
             else:
-                # Fallback: use vision processor directly
-                vision_proc = get_vision_processor()
-                result = vision_proc.process_image(image_path, prompt=caption)
-                
-                if result.get('success'):
-                    response_text = result.get('result', 'Image processed successfully')
-                    await update.message.reply_text(f"🖼️ **Image Analysis:**\n\n{response_text}", parse_mode='Markdown')
-                    vision_processed = True
-                else:
-                    error = result.get('error', 'Unknown error')
-                    # Don't fail completely - photo is saved for ID generation
-                    if 'No vision models' in error or 'all failed' in error.lower():
-                        await update.message.reply_text(
-                            f"📸 **Photo saved!**\n\n"
-                            f"ℹ️ Vision analysis is optional (no API keys needed for ID generation).\n"
-                            f"✅ Photo is ready for ID generation.\n\n"
-                            f"Send your name, DOB, and address to generate your Texas ID."
-                        )
+                # Fallback: use vision processor directly with timeout
+                try:
+                    vision_proc = get_vision_processor()
+                    # Add timeout to prevent hanging
+                    import asyncio
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(vision_proc.process_image, image_path, prompt=caption),
+                        timeout=30.0  # 30 second timeout
+                    )
+                    
+                    if result.get('success'):
+                        response_text = result.get('result', 'Image processed successfully')
+                        # Send analysis as separate message (photo already confirmed)
+                        await update.message.reply_text(f"🖼️ **Image Analysis:**\n\n{response_text}", parse_mode='Markdown')
+                        vision_processed = True
                     else:
-                        await update.message.reply_text(f"⚠️ **Vision analysis failed:**\n{error}\n\n✅ Photo saved for ID generation.")
+                        error = result.get('error', 'Unknown error')
+                        # Don't send another message - photo already confirmed above
+                        logger.info(f"Vision analysis failed: {error}")
+                except asyncio.TimeoutError:
+                    logger.warning("Vision processing timed out after 30 seconds")
+                    # Photo already confirmed, no need to send another message
+                except Exception as e:
+                    logger.warning(f"Vision processing error: {e}")
+                    # Photo already confirmed, no need to send another message
         
         except Exception as e:
             logger.error(f"Image processing error: {e}", exc_info=True)
@@ -4612,15 +4627,8 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ Photo is ready for ID generation."
                 )
         
-        # If vision processing didn't happen, confirm photo is saved
-        if not vision_processed:
-            await update.message.reply_text(
-                f"✅ **Photo received and saved!**\n\n"
-                f"Ready for ID generation. Send your details:\n"
-                f"• Name: [Your Name]\n"
-                f"• DOB: [MM/DD/YYYY]\n"
-                f"• Address: [Your Address]"
-            )
+        # Vision processing is optional - photo is already confirmed above
+        # No need to send another confirmation message
     except Exception as e:
         logger.error(f"Error handling image: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Error: {str(e)}")
