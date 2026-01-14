@@ -48,46 +48,71 @@ class TemplateDownloader:
             Path to downloaded file or None if failed
         """
         try:
-            # Extract file ID from MediaFire URL
-            # MediaFire URLs: https://www.mediafire.com/file/[file_id]/[filename]/file
+            # Extract file key from MediaFire URL
+            # MediaFire URLs: https://www.mediafire.com/file/[file_key]/[filename]/file
             import re
             match = re.search(r'/file/([^/]+)/', url)
             if not match:
                 logger.error(f"Invalid MediaFire URL: {url}")
                 return None
             
-            file_id = match.group(1)
+            file_key = match.group(1)
             
-            # MediaFire direct download API
-            # First, get the download page
+            # MediaFire direct download - use the download page
+            # MediaFire redirects to a download page, then to the actual file
             session = requests.Session()
-            response = session.get(url, allow_redirects=True, timeout=30)
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            
+            # Get the download page
+            download_page_url = f"https://www.mediafire.com/file/{file_key}/"
+            response = session.get(download_page_url, allow_redirects=True, timeout=30)
             response.raise_for_status()
             
-            # Try to find direct download link
-            # MediaFire uses JavaScript to generate download links, so we need to parse the page
-            import re
-            download_link_match = re.search(r'href="(https://download[^"]+)"', response.text)
-            if download_link_match:
-                download_url = download_link_match.group(1)
-            else:
-                # Alternative: try MediaFire API
-                api_url = f"https://www.mediafire.com/api/1.4/file/get_info.php?quick_key={file_id}&response_format=json"
-                api_response = session.get(api_url, timeout=30)
-                if api_response.status_code == 200:
-                    data = api_response.json()
-                    if data.get('response', {}).get('file_infos'):
-                        download_url = data['response']['file_infos'][0].get('download_url')
-                    else:
-                        logger.error("Could not get download URL from MediaFire API")
-                        return None
-                else:
-                    logger.error(f"MediaFire API returned {api_response.status_code}")
-                    return None
+            # Try multiple methods to get download URL
+            download_url = None
+            
+            # Method 1: Look for direct download link in page
+            download_patterns = [
+                r'href="(https://download[^"]+)"',
+                r'kNOk3" href="([^"]+)"',
+                r'downloadUrl["\']?\s*:\s*["\']([^"\']+)["\']',
+                r'data-downloadurl=["\']([^"\']+)["\']',
+            ]
+            
+            for pattern in download_patterns:
+                match = re.search(pattern, response.text)
+                if match:
+                    download_url = match.group(1)
+                    if not download_url.startswith('http'):
+                        download_url = 'https://www.mediafire.com' + download_url
+                    break
+            
+            # Method 2: Try MediaFire API (may require API key, but worth trying)
+            if not download_url:
+                try:
+                    api_url = f"https://www.mediafire.com/api/1.4/file/get_info.php?quick_key={file_key}&response_format=json"
+                    api_response = session.get(api_url, timeout=30)
+                    if api_response.status_code == 200:
+                        data = api_response.json()
+                        if data.get('response', {}).get('file_infos'):
+                            download_url = data['response']['file_infos'][0].get('download_url')
+                except:
+                    pass
+            
+            # Method 3: Construct direct download URL (MediaFire pattern)
+            if not download_url:
+                # Try direct download pattern
+                download_url = f"https://download{file_key[:2]}.mediafire.com/{file_key}/file"
+            
+            if not download_url:
+                logger.error("Could not determine download URL from MediaFire")
+                return None
             
             # Download file
             logger.info(f"Downloading template from MediaFire: {download_url}")
-            file_response = session.get(download_url, stream=True, timeout=300)
+            file_response = session.get(download_url, stream=True, timeout=300, allow_redirects=True)
             file_response.raise_for_status()
             
             # Determine filename
@@ -98,7 +123,9 @@ class TemplateDownloader:
                     template_name = content_disposition.split('filename=')[1].strip('"\'')
                 else:
                     # Extract from URL
-                    template_name = url.split('/')[-1] or f"template_{file_id}"
+                    template_name = url.split('/')[-2] if '/' in url else f"template_{file_key}"
+                    # Clean filename
+                    template_name = "".join(c for c in template_name if c.isalnum() or c in (' ', '-', '_', '.')).strip()
             
             # Determine file type and save location
             file_ext = Path(template_name).suffix.lower()
@@ -110,11 +137,14 @@ class TemplateDownloader:
                 save_path = self.templates_dir / template_name
             
             # Download and save
+            total_size = 0
             with open(save_path, 'wb') as f:
                 for chunk in file_response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+                    if chunk:
+                        f.write(chunk)
+                        total_size += len(chunk)
             
-            logger.info(f"Template downloaded: {save_path}")
+            logger.info(f"Template downloaded: {save_path} ({total_size / 1024 / 1024:.2f} MB)")
             
             # Extract if archive
             if file_ext in ['.rar', '.zip']:
