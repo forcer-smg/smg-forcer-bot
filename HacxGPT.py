@@ -759,7 +759,9 @@ CURSOR-STYLE EXECUTION MODEL:
 
 2. CHECK DATABASE FIRST (CRITICAL FOR TEMPLATES):
    - ALWAYS check template_manager for existing templates BEFORE creating new ones
-   - Query database: `from template_manager import get_template_manager; tm = get_template_manager(); template = tm.get_template(name='texas_dl')`
+   - Query database: `from template_manager import get_template_manager; from database_hybrid import Database; db = Database(); tm = get_template_manager(db); template = tm.get_template(name='texas_dl')`
+   - Template structure: {'name': str, 'type': str, 'file_path': str, 'description': str, 'is_global': bool, 'template_data': dict}
+   - Access template fields: template['name'], template['type'], template['file_path'] (NOT template['template_type'] or template['tags'])
    - Search templates: `templates = tm.list_templates(template_type='id')` to find ID templates
    - If template found: USE IT (don't create basic placeholder)
    - If not found: Download → Process → Save to database for future use
