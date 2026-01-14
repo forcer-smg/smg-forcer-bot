@@ -341,8 +341,8 @@ async def safe_reply_text(update: Update, text: str, parse_mode: str = 'Markdown
             raise
 
 
-# Message content cache to prevent duplicate edits
-_message_content_cache: Dict[str, str] = {}
+# Message edit rate limiting and failure tracking (replaces old _message_content_cache)
+# These are defined at module level after the lock initialization
 
 async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', max_retries: int = 2, min_edit_interval: float = 0.5, **kwargs):
     """
