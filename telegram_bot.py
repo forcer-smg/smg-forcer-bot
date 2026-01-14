@@ -3449,7 +3449,8 @@ async def download_template_command(update: Update, context: ContextTypes.DEFAUL
                     if 'filename=' in content_disposition:
                         template_name = content_disposition.split('filename=')[1].strip('"\'')
                     else:
-                        template_name = url.split('/')[-1].split('?')[0] or f"template_{int(time.time())}"
+                        import time
+                template_name = url.split('/')[-1].split('?')[0] or f"template_{int(time.time())}"
                 
                 file_ext = Path(template_name).suffix.lower()
                 if file_ext == '.psd':
