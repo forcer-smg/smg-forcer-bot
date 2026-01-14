@@ -3414,9 +3414,14 @@ async def generate_excel_command(update: Update, context: ContextTypes.DEFAULT_T
         rows = [line.split(',') for line in user_message.split('\n') if line.strip()]
         filepath = doc_gen.generate_excel(rows)
         
-        if filepath:
+        if filepath and Path(filepath).exists():
+            file_size = Path(filepath).stat().st_size
+            if file_size == 0:
+                await update.message.reply_text("❌ Generated Excel spreadsheet is empty. Please try again.")
+                return
             with open(filepath, 'rb') as f:
                 await update.message.reply_document(document=f, filename=Path(filepath).name)
+            logger.info(f"Sent generated Excel spreadsheet: {filepath} (size: {file_size} bytes)")
         else:
             await update.message.reply_text("❌ Failed to generate Excel spreadsheet")
     except Exception as e:
