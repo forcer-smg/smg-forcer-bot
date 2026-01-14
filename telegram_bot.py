@@ -106,13 +106,6 @@ _message_edit_failures: Dict[str, int] = {}  # message_id -> consecutive_failure
 _message_edit_lock = asyncio.Lock()  # Async lock for concurrent edits
 _edit_in_progress: Dict[str, bool] = {}  # message_id -> is_editing
 
-# Message edit rate limiting and failure tracking
-_message_edit_cache: Dict[str, str] = {}  # message_id -> content
-_message_edit_times: Dict[str, float] = {}  # message_id -> last_edit_time
-_message_edit_failures: Dict[str, int] = {}  # message_id -> consecutive_failures
-_message_edit_lock = asyncio.Lock()  # Async lock for concurrent edits
-_edit_in_progress: Dict[str, bool] = {}  # message_id -> is_editing
-
 # Concurrency management for 500+ users
 try:
     from concurrency_manager import get_concurrency_manager, ConcurrencyManager
