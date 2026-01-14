@@ -73,6 +73,14 @@ except ImportError:
     BARCODE_AVAILABLE = False
     logger.warning("python-barcode not available. Barcode generation will be limited.")
 
+# PSD template processing
+try:
+    from psd_tools import PSDImage
+    PSD_TOOLS_AVAILABLE = True
+except ImportError:
+    PSD_TOOLS_AVAILABLE = False
+    logger.warning("psd-tools not available. PSD template processing will be limited.")
+
 
 class DocumentGenerator:
     """Generate PDF, Word, and Excel documents with formatting and templates"""
@@ -306,10 +314,11 @@ class DocumentGenerator:
             return None
     
     def generate_from_template(self,
-                               template_data: Dict,
-                               doc_type: str = "pdf",
-                               filename: str = None,
-                               variables: Dict[str, Any] = None) -> Optional[str]:
+                              template_data: Dict,
+                              doc_type: str = "pdf",
+                              filename: str = None,
+                              variables: Dict[str, Any] = None,
+                              template_name: str = None) -> Optional[str]:
         """
         Generate document from template data
         
@@ -318,11 +327,25 @@ class DocumentGenerator:
             doc_type: 'pdf', 'docx', or 'xlsx'
             filename: Output filename
             variables: Variables to fill in template placeholders
+            template_name: Name of template to use (for PSD templates)
         
         Returns:
             Path to generated document or None if failed
         """
         try:
+            # Check if template_name is provided and we have a PSD template
+            if template_name:
+                try:
+                    from template_processor import get_template_processor
+                    processor = get_template_processor()
+                    template_info = processor.get_template_info(template_name)
+                    
+                    if template_info and template_info.get('file_path'):
+                        # Use PSD template
+                        return self._generate_from_psd_template(template_info, variables or {}, filename)
+                except Exception as e:
+                    logger.warning(f"Could not use PSD template: {e}")
+            
             # Fill template variables
             content = self._fill_template(template_data, variables or {})
             

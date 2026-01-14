@@ -3330,11 +3330,29 @@ async def use_template_command(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"❌ Template not found: `{template_name}`", parse_mode='Markdown')
             return
         
+        # Process template if it's a PSD file
+        template_file_path = template.get('template_data', {}).get('file_path')
+        if template_file_path and Path(template_file_path).exists():
+            try:
+                from template_processor import get_template_processor
+                processor = get_template_processor()
+                processed_info = processor.process_template(template_file_path, template_name)
+                if processed_info:
+                    await update.message.reply_text(
+                        f"✅ Template processed!\n"
+                        f"📊 Layers: {processed_info.get('layer_count', 0)}\n"
+                        f"📝 Text fields: {processed_info.get('text_layer_count', 0)}",
+                        parse_mode='Markdown'
+                    )
+            except Exception as e:
+                logger.warning(f"Could not process template: {e}")
+        
         doc_gen = get_document_generator()
         filepath = doc_gen.generate_from_template(
             template['template_data'],
             doc_type=template['type'],
-            variables={}  # Can be enhanced to accept variables
+            variables={},  # Can be enhanced to accept variables
+            template_name=template_name
         )
         
         if filepath:

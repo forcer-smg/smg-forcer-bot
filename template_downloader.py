@@ -187,14 +187,40 @@ class TemplateDownloader:
             # Find PSD files in extracted directory
             psd_files = list(extract_dir.rglob('*.psd'))
             if psd_files:
-                # Move first PSD to psd directory
-                psd_file = psd_files[0]
-                target_path = self.psd_dir / psd_file.name
-                shutil.move(str(psd_file), str(target_path))
-                logger.info(f"Extracted PSD template: {target_path}")
-                return str(target_path)
+                # Move all PSD files to psd directory
+                extracted_psds = []
+                for psd_file in psd_files:
+                    target_path = self.psd_dir / psd_file.name
+                    # Avoid overwriting existing files
+                    if target_path.exists():
+                        counter = 1
+                        while target_path.exists():
+                            target_path = self.psd_dir / f"{psd_file.stem}_{counter}{psd_file.suffix}"
+                            counter += 1
+                    
+                    shutil.move(str(psd_file), str(target_path))
+                    extracted_psds.append(str(target_path))
+                    logger.info(f"Extracted PSD template: {target_path}")
+                
+                # Process the first PSD for AI use
+                if extracted_psds:
+                    try:
+                        from template_processor import get_template_processor
+                        processor = get_template_processor(str(self.templates_dir))
+                        processor.process_template(extracted_psds[0])
+                        logger.info(f"Processed template for AI: {extracted_psds[0]}")
+                    except Exception as e:
+                        logger.warning(f"Could not process template for AI: {e}")
+                
+                return extracted_psds[0]  # Return first extracted PSD
             
-            logger.warning(f"No PSD files found in archive: {archive_path}")
+            # Also check for other template files
+            template_files = list(extract_dir.rglob('*.pdf')) + list(extract_dir.rglob('*.docx'))
+            if template_files:
+                logger.info(f"Found {len(template_files)} template files in archive")
+                return str(template_files[0])
+            
+            logger.warning(f"No template files found in archive: {archive_path}")
             return str(extract_dir)
             
         except Exception as e:
