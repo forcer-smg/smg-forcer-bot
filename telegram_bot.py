@@ -4964,10 +4964,86 @@ If you believe this is an error, please contact support.
         except Exception as e:
             logger.warning(f"Could not restore photo from state: {e}")
     
+    # CHECK FOR "SEND ME THE GENERATED ID" REQUEST
+    message_lower = user_message.lower()
+    if any(phrase in message_lower for phrase in ['send me the generated id', 'send me the id', 'where is the id', 'do you have the id', 'show me the id']):
+        # Check if ID was already generated
+        try:
+            from user_state_manager import get_user_state_manager
+            state_mgr = get_user_state_manager(db)
+            
+            # Check for delivered results
+            pending_task = state_mgr.get_pending_task(user_id)
+            if pending_task:
+                delivered = pending_task.get('results_delivered', [])
+                for result in delivered:
+                    if result.get('type') == 'id_image' and result.get('path'):
+                        id_path = result['path']
+                        if Path(id_path).exists():
+                            # Send existing ID
+                            with open(id_path, 'rb') as f:
+                                await update.message.reply_document(
+                                    document=f,
+                                    filename=Path(id_path).name,
+                                    caption="✅ **Texas ID (Previously Generated)**"
+                                )
+                            logger.info(f"Sent previously generated ID: {id_path}")
+                            return
+            
+            # Check workspace for generated ID files
+            try:
+                from user_workspace_manager import UserWorkspaceManager
+                workspace_manager = UserWorkspaceManager.get_instance()
+                user_workspace = workspace_manager.get_user_workspace(user_id)
+            except ImportError:
+                base_workspace = os.getenv('WORKSPACE_ROOT', os.getcwd())
+                user_workspace = Path(os.path.join(base_workspace, f"user_{user_id}"))
+            
+            # Search for ID files
+            id_files = list(user_workspace.rglob('*id*.png')) + list(user_workspace.rglob('*texas*.png'))
+            if id_files:
+                # Get most recent
+                latest_id = max(id_files, key=lambda p: p.stat().st_mtime)
+                with open(latest_id, 'rb') as f:
+                    await update.message.reply_document(
+                        document=f,
+                        filename=latest_id.name,
+                        caption="✅ **Texas ID Found**"
+                    )
+                logger.info(f"Sent found ID: {latest_id}")
+                return
+            
+            # If no ID found, generate it using saved photo + data
+            user_photo = context.user_data.get('last_photo')
+            if not user_photo:
+                photo_state = state_mgr.get_state(user_id, 'last_photo')
+                if photo_state and photo_state.get('value', {}).get('path'):
+                    user_photo = photo_state['value']['path']
+                    context.user_data['last_photo'] = user_photo
+            
+            if user_photo and Path(user_photo).exists():
+                # Get saved user data
+                user_data = context.user_data.get('saved_user_data', {})
+                if not user_data:
+                    user_data_state = state_mgr.get_state(user_id, 'user_data')
+                    if user_data_state:
+                        user_data = user_data_state.get('value', {})
+                
+                if user_data:
+                    await update.message.reply_text("🔄 Generating ID from saved photo and data...")
+                    # Will fall through to ID generation below
+                else:
+                    await update.message.reply_text("❌ I have your photo but need name/DOB/address. Please provide:\n\nName: [Your Name]\nDOB: [MM/DD/YYYY]\nAddress: [Your Address]")
+                    return
+            else:
+                await update.message.reply_text("❌ No photo found. Please upload a photo first.")
+                return
+        except Exception as e:
+            logger.error(f"Error checking for generated ID: {e}", exc_info=True)
+    
     if user_photo and Path(user_photo).exists():
         # Check if message contains ID-related keywords or data
-        message_lower = user_message.lower()
-        id_keywords = ['texas', 'id', 'driver', 'license', 'dl', 'identification']
+        id_keywords = ['texas', 'id', 'driver', 'license', 'dl', 'identification', 'generate id', 'create id']
         has_id_keyword = any(keyword in message_lower for keyword in id_keywords)
         
         # Check if message looks like ID data (name, DOB, address pattern)
@@ -4979,9 +5055,26 @@ If you believe this is an error, please contact support.
         # If user mentions ID or has ID data pattern, auto-generate
         if has_id_keyword or (has_name and (has_dob or has_address)):
             try:
-                # Extract user data from message
+                # Extract user data from message OR use saved state
                 user_data = {}
                 
+                # First, try to get saved user data from state
+                saved_data = context.user_data.get('saved_user_data', {})
+                if not saved_data:
+                    try:
+                        from user_state_manager import get_user_state_manager
+                        state_mgr = get_user_state_manager(db)
+                        user_data_state = state_mgr.get_state(user_id, 'user_data')
+                        if user_data_state:
+                            saved_data = user_data_state.get('value', {})
+                    except Exception as e:
+                        logger.warning(f"Could not load saved user data: {e}")
+                
+                if saved_data:
+                    user_data.update(saved_data)
+                    logger.info(f"Using saved user data: {user_data}")
+                
+                # Then, extract/override from current message
                 # Extract name
                 name_match = re.search(r'name[:\s]+([^\n,]+)', user_message, re.I)
                 if not name_match:
@@ -5062,8 +5155,17 @@ If you believe this is an error, please contact support.
                                    f"Address: {user_data.get('address', 'N/A')}"
                         )
                     logger.info(f"Auto-generated and sent ID: {filepath}")
-                    # Clear photo from context after successful generation
-                    del context.user_data['last_photo']
+                    
+                    # Mark result as delivered in state
+                    try:
+                        from user_state_manager import get_user_state_manager
+                        state_mgr = get_user_state_manager(db)
+                        state_mgr.mark_result_delivered(user_id, 'id_image', filepath)
+                        state_mgr.clear_pending_task(user_id)
+                    except Exception as e:
+                        logger.warning(f"Could not update state: {e}")
+                    
+                    # Keep photo in state for future use (don't delete from context)
                     return
                 else:
                     logger.warning(f"ID generation failed, filepath: {filepath}")
