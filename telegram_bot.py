@@ -3713,6 +3713,10 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image_path = f"temp_image_{user_id}_{file_id}.jpg"
         await file.download_to_drive(image_path)
         
+        # Store photo path in context for template processing
+        context.user_data['last_photo'] = image_path
+        context.user_data['last_photo_time'] = time.time()
+        
         # Get caption or use default
         caption = update.message.caption or "What is in this image? Describe it in detail."
         
