@@ -3403,6 +3403,85 @@ async def delete_template_command(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 
+async def download_template_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /download_template command - Download template from MediaFire or URL"""
+    user_id = update.effective_user.id
+    args = context.args
+    
+    if not args or len(args) < 1:
+        await update.message.reply_text(
+            "📥 *Download Template*\n\n"
+            "Usage: `/download_template [url] [name]`\n\n"
+            "Supports:\n"
+            "• MediaFire links\n"
+            "• Direct download URLs\n\n"
+            "Example: `/download_template https://www.mediafire.com/file/.../texas_dl.rar texas_dl`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    url = args[0]
+    template_name = args[1] if len(args) > 1 else None
+    
+    try:
+        from template_downloader import get_template_downloader
+        
+        await update.message.reply_text("📥 Downloading template... This may take a moment.")
+        
+        downloader = get_template_downloader()
+        
+        if 'mediafire.com' in url.lower():
+            file_path = downloader.download_from_mediafire(url, template_name)
+        else:
+            # Direct URL download
+            await update.message.reply_text("❌ Direct URL downloads not yet implemented. Use MediaFire links.")
+            return
+        
+        if file_path:
+            # Save to template database
+            from template_manager import get_template_manager
+            template_mgr = get_template_manager(db)
+            
+            # Determine template type from file extension
+            file_ext = Path(file_path).suffix.lower()
+            if file_ext == '.psd':
+                template_type = 'psd'
+            elif file_ext == '.pdf':
+                template_type = 'pdf'
+            else:
+                template_type = 'other'
+            
+            template_id = template_mgr.save_template(
+                user_id=user_id,
+                name=template_name or Path(file_path).stem,
+                template_type=template_type,
+                template_data={'file_path': file_path, 'source_url': url},
+                category='downloaded',
+                description=f"Downloaded from {url}"
+            )
+            
+            if template_id:
+                await update.message.reply_text(
+                    f"✅ Template downloaded and saved!\n\n"
+                    f"📁 File: `{Path(file_path).name}`\n"
+                    f"💾 Template ID: `{template_id}`\n"
+                    f"📋 Use with: `/use_template {template_name or Path(file_path).stem}`",
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text(
+                    f"✅ Template downloaded: `{file_path}`\n\n"
+                    f"⚠️ Could not save to database, but file is available.",
+                    parse_mode='Markdown'
+                )
+        else:
+            await update.message.reply_text("❌ Failed to download template. Check the URL and try again.")
+            
+    except Exception as e:
+        logger.error(f"Error downloading template: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
 # ==================== Image Generation Commands ====================
 
 async def generate_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3774,6 +3853,9 @@ async def handle_enhancement_request(query, data: str, user_id: int, context: Co
                             filename=f"enhanced_{file_name}",
                             caption=f"✨ Enhanced code ({enhancement_type})"
                         )
+                    await query.edit_message_text(f"✅ Code enhanced successfully! Enhanced file sent.")
+                else:
+                    await query.edit_message_text("❌ Enhancement failed. File not generated.")
             else:
                 # Fallback: use brain directly to enhance
                 code = Path(file_path).read_text(encoding='utf-8', errors='ignore')
@@ -3787,15 +3869,16 @@ async def handle_enhancement_request(query, data: str, user_id: int, context: Co
                 enhanced_path = Path(file_path).parent / f"enhanced_{file_name}"
                 enhanced_path.write_text(enhanced_code, encoding='utf-8')
                 
-                with open(enhanced_path, 'rb') as f:
-                    await query.message.reply_document(
-                        document=f,
-                        filename=f"enhanced_{file_name}",
-                        caption=f"✨ Enhanced code ({enhancement_type})"
-                    )
-                await query.edit_message_text(f"✅ Code enhanced successfully! Enhanced file sent.")
-            else:
-                await query.edit_message_text("❌ Enhancement failed. File not generated.")
+                if Path(enhanced_path).exists():
+                    with open(enhanced_path, 'rb') as f:
+                        await query.message.reply_document(
+                            document=f,
+                            filename=f"enhanced_{file_name}",
+                            caption=f"✨ Enhanced code ({enhancement_type})"
+                        )
+                    await query.edit_message_text(f"✅ Code enhanced successfully! Enhanced file sent.")
+                else:
+                    await query.edit_message_text("❌ Enhancement failed. File not generated.")
         except Exception as e:
             logger.error(f"Error enhancing code: {e}", exc_info=True)
             await query.edit_message_text(f"❌ Error enhancing code: {str(e)}")
