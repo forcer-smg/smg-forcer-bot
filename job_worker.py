@@ -229,6 +229,21 @@ class JobWorker:
         if job_data.get('last_results'):
             context_text += f"\n\nLast results:\n{job_data.get('last_results')}"
         
+        # Add execution results from previous step (if any)
+        if job_data.get('execution_results'):
+            context_text += f"\n\nPrevious command execution results:\n"
+            for i, exec_result in enumerate(job_data.get('execution_results', [])[-5:], 1):  # Last 5 results
+                cmd = exec_result.get('command', 'N/A')[:50]
+                success = "✅ SUCCESS" if exec_result.get('success') else "❌ FAILED"
+                exit_code = exec_result.get('exit_code', 'N/A')
+                stdout = exec_result.get('stdout', '')[:200]
+                stderr = exec_result.get('stderr', '')[:200]
+                context_text += f"\n{i}. {cmd} - {success} (exit_code: {exit_code})\n"
+                if stdout:
+                    context_text += f"   Output: {stdout}\n"
+                if stderr:
+                    context_text += f"   Error: {stderr}\n"
+        
         # Call AI with streaming
         try:
             # Generate response (non-streaming for now, can be enhanced)
