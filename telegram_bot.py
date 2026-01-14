@@ -407,11 +407,29 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
         # Truncate and add indicator
         text = text[:4000] + "\n\n... (message truncated)"
     
+    # Check rate limiter before attempting edit
+    if rate_limiter:
+        if not rate_limiter.can_send_message():
+            # Rate limit hit - wait or skip edit
+            wait_time = await rate_limiter.wait_if_needed()
+            if wait_time > 5.0:  # If we need to wait more than 5 seconds, skip edit
+                logger.warning(f"Skipping edit due to rate limit (would wait {wait_time:.1f}s)")
+                return
+    
     # Retry logic with exponential backoff
     last_error = None
     for attempt in range(max_retries):
         try:
+            # Wait if rate limiter says we need to
+            if rate_limiter:
+                await rate_limiter.wait_if_needed()
+            
             await query.edit_message_text(text, parse_mode=parse_mode, **kwargs)
+            
+            # Record successful send in rate limiter
+            if rate_limiter:
+                rate_limiter.record_message_sent()
+            
             # Cache successful edit
             if message_id:
                 with _message_edit_lock:
@@ -422,6 +440,52 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
         except BadRequest as e:
             last_error = e
             error_str = str(e).lower()
+            
+            # Handle 429 rate limit errors
+            if '429' in error_str or 'too many requests' in error_str or 'rate limit' in error_str:
+                logger.warning(f"Rate limit hit on edit_message_text (attempt {attempt + 1}/{max_retries})")
+                if rate_limiter:
+                    # Extract retry_after if available
+                    retry_after = None
+                    if 'retry_after' in error_str:
+                        import re
+                        match = re.search(r'retry_after[:\s]+(\d+)', error_str)
+                        if match:
+                            retry_after = int(match.group(1))
+                    retry_info = rate_limiter.handle_rate_limit(retry_after)
+                    
+                    # If we need to wait too long, give up and send new message
+                    if retry_info['backoff_time'] > 10.0:
+                        logger.warning(f"Rate limit backoff too long ({retry_info['backoff_time']:.1f}s), sending new message instead")
+                        try:
+                            if hasattr(query, 'message') and query.message:
+                                await query.message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
+                            elif hasattr(query, 'effective_message') and query.effective_message:
+                                await query.effective_message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
+                            if rate_limiter:
+                                rate_limiter.record_message_sent()
+                            return
+                        except Exception:
+                            pass
+                        return
+                    
+                    # Wait for backoff period
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(retry_info['backoff_time'])
+                        continue
+                    else:
+                        # Max retries reached - send new message instead
+                        try:
+                            if hasattr(query, 'message') and query.message:
+                                await query.message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
+                            elif hasattr(query, 'effective_message') and query.effective_message:
+                                await query.effective_message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
+                            if rate_limiter:
+                                rate_limiter.record_message_sent()
+                            return
+                        except Exception:
+                            pass
+                        return
             
             # Handle specific error types
             if 'message is not modified' in error_str:
