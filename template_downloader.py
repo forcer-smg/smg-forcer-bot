@@ -238,6 +238,122 @@ class TemplateDownloader:
             logger.error(f"Error saving template file: {e}", exc_info=True)
             return None
     
+    def download_from_mega(self, url: str, template_name: str = None) -> Optional[str]:
+        """
+        Download file from MEGA.nz
+        
+        Args:
+            url: MEGA.nz file or folder URL
+            template_name: Name for the template (auto-extracted if None)
+        
+        Returns:
+            Path to downloaded file or None if failed
+        """
+        if not MEGA_AVAILABLE:
+            logger.error("mega.py not available for MEGA.nz downloads. Install with: pip install mega.py")
+            return None
+        
+        try:
+            # Initialize MEGA client (anonymous download)
+            mega = Mega()
+            
+            # Extract file key from URL
+            # MEGA URLs: https://mega.nz/file/[file_key]#[decryption_key]
+            # Or: https://mega.nz/folder/[folder_key]#[decryption_key]
+            import re
+            
+            # Check if it's a folder
+            folder_match = re.search(r'/folder/([^#]+)#([^#]+)', url)
+            file_match = re.search(r'/file/([^#]+)#([^#]+)', url)
+            
+            if folder_match:
+                # Download entire folder
+                folder_key = folder_match.group(1)
+                logger.info(f"Downloading MEGA folder: {folder_key}")
+                
+                try:
+                    # Get folder from URL
+                    folder = mega.get_folder_from_url(url)
+                    
+                    # Download all files in folder
+                    downloaded_files = []
+                    files = folder.get_files()
+                    
+                    for file_node in files:
+                        try:
+                            # Download file
+                            file_path = mega.download_url(url, dest_path=str(self.templates_dir))
+                            if file_path and Path(file_path).exists():
+                                downloaded_files.append(file_path)
+                        except Exception as e:
+                            logger.warning(f"Error downloading file from folder: {e}")
+                            continue
+                    
+                    if downloaded_files:
+                        logger.info(f"Downloaded {len(downloaded_files)} files from MEGA folder")
+                        return downloaded_files[0]  # Return first file
+                    else:
+                        logger.error("No files downloaded from MEGA folder")
+                        return None
+                except Exception as e:
+                    logger.error(f"Error accessing MEGA folder: {e}")
+                    return None
+                    
+            elif file_match:
+                # Download single file
+                file_key = file_match.group(1)
+                logger.info(f"Downloading MEGA file: {file_key}")
+                
+                try:
+                    # Download file
+                    if not template_name:
+                        # Try to get filename from MEGA
+                        try:
+                            file_info = mega.get_public_file_info(url)
+                            if isinstance(file_info, dict):
+                                template_name = file_info.get('name', f"mega_file_{file_key[:8]}")
+                            else:
+                                template_name = f"mega_file_{file_key[:8]}"
+                        except:
+                            template_name = f"mega_file_{file_key[:8]}"
+                    
+                    # Determine save location
+                    file_ext = Path(template_name).suffix.lower()
+                    if file_ext == '.psd':
+                        save_dir = self.psd_dir
+                    elif file_ext in ['.rar', '.zip']:
+                        save_dir = self.templates_dir
+                    else:
+                        save_dir = self.templates_dir
+                    
+                    # Download file
+                    downloaded_path = mega.download_url(url, dest_path=str(save_dir))
+                    
+                    if downloaded_path and Path(downloaded_path).exists():
+                        logger.info(f"MEGA file downloaded: {downloaded_path}")
+                        return str(downloaded_path)
+                    else:
+                        # File might have different name, search for recently created files
+                        import time
+                        recent_time = time.time() - 60  # Last minute
+                        for file in save_dir.iterdir():
+                            if file.stat().st_mtime > recent_time:
+                                logger.info(f"Found recently downloaded file: {file}")
+                                return str(file)
+                        
+                        logger.error("MEGA file download completed but file not found")
+                        return None
+                except Exception as e:
+                    logger.error(f"Error downloading MEGA file: {e}", exc_info=True)
+                    return None
+            else:
+                logger.error(f"Invalid MEGA.nz URL format: {url}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error downloading from MEGA.nz: {e}", exc_info=True)
+            return None
+    
     def list_templates(self, template_type: str = None) -> Dict[str, list]:
         """List available template files"""
         templates = {}
