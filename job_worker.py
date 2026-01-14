@@ -293,9 +293,30 @@ class JobWorker:
             current_step += 1
             progress_pct = min(100, int((current_step / total_steps) * 100)) if total_steps > 0 else 0
             
+            # Detect generated files
+            generated_files = []
+            try:
+                from file_detector import get_file_detector
+                # Get workspace path from job data or use default
+                workspace_path = job_data.get('workspace_path', f'/app/user_{user_id}')
+                file_detector = get_file_detector(workspace_path)
+                
+                # Detect files generated in last 5 minutes
+                detected_files = file_detector.detect_code_files(since_minutes=5)
+                generated_files = [f['path'] for f in detected_files]
+                
+                if generated_files:
+                    logger.info(f"Detected {len(generated_files)} generated files: {generated_files[:3]}...")
+            except Exception as e:
+                logger.warning(f"Error detecting files: {e}")
+            
             # Send progress update
             progress_text = f"🔄 **Step {current_step}/{total_steps}** ({progress_pct}%)\n\n"
             progress_text += response_text[:3500]  # Leave room for formatting
+            
+            # Add file count if files detected
+            if generated_files:
+                progress_text += f"\n\n📁 **Generated Files:** {len(generated_files)}"
             
             message_id = await self._send_progress_update(
                 chat_id=chat_id,
@@ -309,14 +330,76 @@ class JobWorker:
             next_tick = datetime.now() + timedelta(seconds=3)
             
             if is_complete:
+                # Detect all generated files one more time
+                try:
+                    from file_detector import get_file_detector
+                    workspace_path = job_data.get('workspace_path', f'/app/user_{user_id}')
+                    file_detector = get_file_detector(workspace_path)
+                    
+                    # Detect all files generated during task (last 30 minutes)
+                    all_detected = file_detector.detect_code_files(since_minutes=30)
+                    generated_files = [f['path'] for f in all_detected]
+                    
+                    if generated_files:
+                        logger.info(f"Task complete - sending {len(generated_files)} generated files")
+                except Exception as e:
+                    logger.warning(f"Error detecting final files: {e}")
+                    generated_files = []
+                
                 # Send final summary
                 summary_text = f"✅ **Task Completed**\n\n{task_description}\n\n**Final Result:**\n\n{response_text[:3500]}"
+                if generated_files:
+                    summary_text += f"\n\n📁 **Generated {len(generated_files)} file(s)** - sending now..."
+                
                 await self._send_progress_update(
                     chat_id=chat_id,
                     message_id=message_id,
                     text=summary_text,
                     is_final=True
                 )
+                
+                # Send generated files
+                if generated_files and self.bot_application:
+                    try:
+                        from file_generator import is_file_size_valid, MAX_FILE_SIZE
+                        from pathlib import Path as PathLib
+                        
+                        bot = self.bot_application.bot
+                        
+                        for file_path in generated_files:
+                            if not file_path or not PathLib(file_path).exists():
+                                continue
+                            
+                            # Check file size
+                            if is_file_size_valid(file_path):
+                                try:
+                                    with open(file_path, 'rb') as f:
+                                        # Wait for rate limit
+                                        if self.telegram_limiter:
+                                            await self.telegram_limiter.wait_if_needed(chat_id)
+                                        
+                                        await bot.send_document(
+                                            chat_id=chat_id,
+                                            document=f,
+                                            filename=PathLib(file_path).name,
+                                            caption=f"📄 **Generated File:** `{PathLib(file_path).name}`"
+                                        )
+                                        
+                                        # Record send
+                                        if self.telegram_limiter:
+                                            self.telegram_limiter.record_message_sent(chat_id)
+                                        
+                                        logger.info(f"Sent generated file: {file_path}")
+                                except Exception as e:
+                                    logger.error(f"Failed to send file {file_path}: {e}")
+                            else:
+                                file_size = PathLib(file_path).stat().st_size
+                                await bot.send_message(
+                                    chat_id=chat_id,
+                                    text=f"⚠️ File `{PathLib(file_path).name}` is too large ({file_size / 1024 / 1024:.2f}MB). Maximum: {MAX_FILE_SIZE / 1024 / 1024:.0f}MB."
+                                )
+                    except Exception as e:
+                        logger.error(f"Error sending files: {e}", exc_info=True)
                 
                 # Mark job as completed
                 self.job_queue.update_job(
@@ -326,7 +409,7 @@ class JobWorker:
                     total_steps=total_steps,
                     progress_pct=100,
                     last_message_id=message_id,
-                    job_data=job_data
+                    job_data={**job_data, 'generated_files': generated_files}
                 )
             else:
                 # Update job for next step
