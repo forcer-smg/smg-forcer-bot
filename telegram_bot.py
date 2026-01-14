@@ -5250,6 +5250,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning(f"Error logging training data (user input): {e}")
     
+    # Detect and save requested state if user mentions it (e.g., "I want a Florida state ID")
+    message_lower = user_message.lower()
+    state_keywords_detect = {
+        'texas': ['texas', 'tx'],
+        'florida': ['florida', 'fl'],
+        'california': ['california', 'ca'],
+        'new york': ['new york', 'ny', 'newyork'],
+        'illinois': ['illinois', 'il'],
+        'ohio': ['ohio', 'oh'],
+        'pennsylvania': ['pennsylvania', 'pa'],
+        'georgia': ['georgia', 'ga'],
+        'michigan': ['michigan', 'mi']
+    }
+    
+    # Check if message contains state ID request (e.g., "I want a Florida state ID")
+    id_request_patterns = ['want', 'need', 'get', 'generate', 'create', 'make', 'check']
+    has_id_request = any(pattern in message_lower for pattern in id_request_patterns)
+    has_state_id_keywords = any(keyword in message_lower for keyword in ['state id', 'state id', 'driver license', 'driver\'s license', 'dl', 'id'])
+    
+    if has_id_request and has_state_id_keywords:
+        for state, keywords in state_keywords_detect.items():
+            if any(keyword in message_lower for keyword in keywords):
+                try:
+                    from user_state_manager import get_user_state_manager
+                    state_mgr = get_user_state_manager(db)
+                    state_mgr.save_state(user_id, 'requested_state', state)
+                    logger.info(f"Detected and saved requested state from message: {state}")
+                except Exception as e:
+                    logger.warning(f"Could not save detected state: {e}")
+                break
+    
     # Check if user is blocked
     if db.is_blocked(user_id):
         blocked_text = """
