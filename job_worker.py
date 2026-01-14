@@ -246,16 +246,45 @@ class JobWorker:
                 parser = get_ai_response_parser()
                 parsed = parser.parse_ai_response(response_text)
                 
+                # Get workspace path
+                workspace_path = job_data.get('workspace_path', f'/app/user_{user_id}')
+                
+                # Generate files from code blocks FIRST
+                if parsed.get('code_blocks'):
+                    try:
+                        from file_generator import FileGenerator
+                        file_gen = FileGenerator(workspace_path)
+                        
+                        # Generate files from code blocks
+                        generated_files = file_gen.generate_files(
+                            parsed['code_blocks'],
+                            subdirectory=None,
+                            validate=True
+                        )
+                        
+                        # Track generated files
+                        if 'generated_files' not in job_data:
+                            job_data['generated_files'] = []
+                        
+                        for gen_file in generated_files:
+                            if gen_file.get('full_path'):
+                                job_data['generated_files'].append(gen_file['full_path'])
+                                logger.info(f"Generated file: {gen_file['full_path']}")
+                        
+                        logger.info(f"Generated {len(generated_files)} files from code blocks")
+                    except Exception as e:
+                        logger.error(f"Error generating files from code blocks: {e}", exc_info=True)
+                
                 # Execute commands if any
                 if parsed.get('commands'):
                     try:
                         from command_executor import get_command_executor
-                        executor = get_command_executor()
+                        executor = get_command_executor(workspace_path)
                         
                         for cmd_info in parsed['commands']:
                             cmd = cmd_info.get('command', '')
                             if cmd:
-                                result = await executor.execute_command(cmd)
+                                result = executor.execute_command(cmd, cwd=workspace_path)
                                 if result.get('success'):
                                     logger.info(f"Command executed: {cmd[:50]}...")
                                 else:
@@ -338,7 +367,14 @@ class JobWorker:
                     
                     # Detect all files generated during task (last 30 minutes)
                     all_detected = file_detector.detect_code_files(since_minutes=30)
-                    generated_files = [f['path'] for f in all_detected]
+                    detected_files = [f['path'] for f in all_detected]
+                    
+                    # Also include files from job_data (generated from code blocks)
+                    job_generated = job_data.get('generated_files', [])
+                    
+                    # Combine and deduplicate
+                    all_files = list(set(detected_files + job_generated))
+                    generated_files = [f for f in all_files if PathLib(f).exists()]
                     
                     if generated_files:
                         logger.info(f"Task complete - sending {len(generated_files)} generated files")
