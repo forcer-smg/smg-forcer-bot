@@ -118,11 +118,27 @@ class AIResponseParser:
                     commands.append(line)
         
         elif language == 'python':
-            # For Python, the whole block is one command (python script.py)
-            # But we might want to extract individual statements
-            # For now, treat as single command
+            # For Python, execute as a script file (not line by line)
+            # Python code blocks should be executed as complete scripts
             if code_content.strip():
-                commands.append(f"python -c \"{code_content.replace(chr(34), chr(39))}\"")
+                # Write to temp file and execute it
+                import tempfile
+                import os
+                temp_file = None
+                try:
+                    # Create temp file in workspace or system temp
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                        f.write(code_content)
+                        temp_file = f.name
+                    # Execute the temp file
+                    commands.append(f"python3 {temp_file}")
+                    # Store temp file path for cleanup (will be handled by command executor)
+                except Exception as e:
+                    logger.warning(f"Error creating temp file for Python code: {e}")
+                    # Fallback: try python -c with proper escaping
+                    escaped = code_content.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+                    # Use triple quotes for multi-line
+                    commands.append(f'python3 -c """{escaped}"""')
         
         else:
             # For other languages, treat as single command

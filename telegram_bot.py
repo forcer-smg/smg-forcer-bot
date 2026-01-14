@@ -5042,10 +5042,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 'last_photo' in all_state:
             photo_state = all_state['last_photo']
             photo_path = photo_state.get('value', {}).get('path')
-            if photo_path and Path(photo_path).exists():
-                context.user_data['last_photo'] = photo_path
-                context.user_data['last_photo_time'] = photo_state.get('last_updated')
-                logger.info(f"Restored saved photo: {photo_path}")
+            if photo_path:
+                from pathlib import Path as PathLib
+                if PathLib(photo_path).exists():
+                    context.user_data['last_photo'] = photo_path
+                    context.user_data['last_photo_time'] = photo_state.get('last_updated')
+                    logger.info(f"Restored saved photo: {photo_path}")
         
         # Restore saved user data (name, DOB, address, etc.)
         if 'user_data' in all_state:
@@ -5220,24 +5222,26 @@ If you believe this is an error, please contact support.
         except Exception as e:
             logger.error(f"Error checking for generated ID: {e}", exc_info=True)
     
-    if user_photo and Path(user_photo).exists():
-        # Check if message contains ID-related keywords or data
-        id_keywords = ['texas', 'id', 'driver', 'license', 'dl', 'identification', 'generate id', 'create id']
-        has_id_keyword = any(keyword in message_lower for keyword in id_keywords)
-        
-        # Check if message looks like ID data (name, DOB, address pattern)
-        import re
-        # More flexible name detection: "NAME" keyword or capitalized words at start
-        has_name = bool(re.search(r'(?:name[:\s]+)?([A-Z][A-Z\s]+)', user_message)) or bool(re.search(r'^([A-Z][A-Z\s]{3,})', user_message))
-        # DOB detection: MM/DD/YYYY or MM-DD-YYYY
-        has_dob = bool(re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', user_message))
-        # Address detection: number + street name (Rd, St, Ave, Road, Street, etc.)
-        has_address = bool(re.search(r'\d+\s+[A-Za-z]+.*?(?:rd|st|ave|road|street|blvd|boulevard|drive|dr|ln|lane|ct|court|way|pl|place)', user_message, re.I))
-        
-        # If user mentions ID or has ID data pattern, auto-generate
-        if has_id_keyword or (has_name and (has_dob or has_address)):
-            try:
-                # Extract user data from message OR use saved state
+    if user_photo:
+        from pathlib import Path as PathLib
+        if PathLib(user_photo).exists():
+            # Check if message contains ID-related keywords or data
+            id_keywords = ['texas', 'id', 'driver', 'license', 'dl', 'identification', 'generate id', 'create id']
+            has_id_keyword = any(keyword in message_lower for keyword in id_keywords)
+            
+            # Check if message looks like ID data (name, DOB, address pattern)
+            import re
+            # More flexible name detection: "NAME" keyword or capitalized words at start
+            has_name = bool(re.search(r'(?:name[:\s]+)?([A-Z][A-Z\s]+)', user_message)) or bool(re.search(r'^([A-Z][A-Z\s]{3,})', user_message))
+            # DOB detection: MM/DD/YYYY or MM-DD-YYYY
+            has_dob = bool(re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', user_message))
+            # Address detection: number + street name (Rd, St, Ave, Road, Street, etc.)
+            has_address = bool(re.search(r'\d+\s+[A-Za-z]+.*?(?:rd|st|ave|road|street|blvd|boulevard|drive|dr|ln|lane|ct|court|way|pl|place)', user_message, re.I))
+            
+            # If user mentions ID or has ID data pattern, auto-generate
+            if has_id_keyword or (has_name and (has_dob or has_address)):
+                try:
+                    # Extract user data from message OR use saved state
                 user_data = {}
                 
                 # First, try to get saved user data from state
@@ -5357,12 +5361,12 @@ If you believe this is an error, please contact support.
                     user_data=user_data
                 )
                 
-                if filepath and Path(filepath).exists():
+                if filepath and PathLib(filepath).exists():
                     # Send the generated ID
                     with open(filepath, 'rb') as f:
                         await update.message.reply_document(
                             document=f,
-                            filename=Path(filepath).name,
+                            filename=PathLib(filepath).name,
                             caption=f"✅ **Texas ID Generated**\n\n"
                                    f"Name: {user_data.get('name', 'N/A')}\n"
                                    f"DOB: {user_data.get('dob', 'N/A')}\n"
