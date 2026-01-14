@@ -5363,8 +5363,46 @@ If you believe this is an error, please contact support.
         from pathlib import Path as PathLib
         if PathLib(user_photo).exists():
             # Check if message contains ID-related keywords or data
-            id_keywords = ['texas', 'id', 'driver', 'license', 'dl', 'identification', 'generate id', 'create id']
+            id_keywords = ['texas', 'florida', 'california', 'id', 'driver', 'license', 'dl', 'identification', 'generate id', 'create id', 'state id']
             has_id_keyword = any(keyword in message_lower for keyword in id_keywords)
+            
+            # Check saved state for requested state (from previous messages)
+            requested_state_from_history = None
+            try:
+                from user_state_manager import get_user_state_manager
+                state_mgr = get_user_state_manager(db)
+                state_history = state_mgr.get_state(user_id, 'requested_state')
+                if state_history and state_history.get('value'):
+                    requested_state_from_history = state_history['value']
+                    logger.info(f"Found saved requested state: {requested_state_from_history}")
+            except Exception as e:
+                logger.debug(f"Could not load requested state from history: {e}")
+            
+            # Also check current message for state keywords (in case user mentions state in data message)
+            state_keywords_check = {
+                'texas': ['texas', 'tx'],
+                'florida': ['florida', 'fl'],
+                'california': ['california', 'ca'],
+                'new york': ['new york', 'ny', 'newyork'],
+                'illinois': ['illinois', 'il'],
+                'ohio': ['ohio', 'oh'],
+                'pennsylvania': ['pennsylvania', 'pa'],
+                'georgia': ['georgia', 'ga'],
+                'michigan': ['michigan', 'mi']
+            }
+            
+            # If state detected in current message, save it
+            for state, keywords in state_keywords_check.items():
+                if any(keyword in message_lower for keyword in keywords):
+                    try:
+                        from user_state_manager import get_user_state_manager
+                        state_mgr = get_user_state_manager(db)
+                        state_mgr.save_state(user_id, 'requested_state', state)
+                        requested_state_from_history = state
+                        logger.info(f"Detected and saved state from current message: {state}")
+                    except Exception as e:
+                        logger.warning(f"Could not save detected state: {e}")
+                    break
             
             # Check if message looks like ID data (name, DOB, address pattern)
             import re
