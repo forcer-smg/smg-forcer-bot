@@ -345,17 +345,19 @@ async def safe_reply_text(update: Update, text: str, parse_mode: str = 'Markdown
 # Message edit rate limiting and failure tracking (replaces old _message_content_cache)
 # These are defined at module level after the lock initialization
 
-async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', max_retries: int = 0, min_edit_interval: float = 10.0, **kwargs):
+async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', max_retries: int = 0, min_edit_interval: float = 30.0, **kwargs):
     """
     Safely edit a message with Markdown, falling back to plain text if parsing fails.
     Includes content caching, length checks, rate limiting, and retry logic with backoff.
+    
+    CRITICAL: Stops editing immediately on 400 Bad Request errors (permanent errors).
     
     Args:
         query: Query object (CallbackQuery or Update)
         text: Text to send
         parse_mode: Parse mode (default: 'Markdown')
         max_retries: Maximum retry attempts (default: 0, no retries)
-        min_edit_interval: Minimum seconds between edits for same message (default: 10.0, increased)
+        min_edit_interval: Minimum seconds between edits for same message (default: 30.0, increased significantly)
         **kwargs: Additional arguments for edit_message_text
     """
     # Get rate limiter
@@ -382,6 +384,13 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
     
     # Use async lock to prevent concurrent edits
     async with _message_edit_lock:
+        # CRITICAL: Check if this message has failed before (400 errors are permanent)
+        if message_id in _message_edit_failures:
+            if _message_edit_failures[message_id] >= 1:  # Stop after ANY failure
+                # Message has failed - NEVER try to edit again
+                logger.debug(f"Message {message_id} has failed before, skipping edit permanently")
+                return
+        
         # Check if content is unchanged
         if message_id in _message_edit_cache:
             if _message_edit_cache[message_id] == text:
@@ -398,13 +407,6 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
             if time_since_last_edit < min_edit_interval:
                 # Too soon to edit - skip this edit
                 logger.debug(f"Too soon to edit {message_id} ({time_since_last_edit:.1f}s < {min_edit_interval}s)")
-                return
-        
-        # Check if this message has too many consecutive failures
-        if message_id in _message_edit_failures:
-            if _message_edit_failures[message_id] >= 1:  # Stop after 1 failure (400 errors are permanent)
-                # Too many failures - stop trying to edit
-                logger.debug(f"Message {message_id} has {_message_edit_failures[message_id]} failures, skipping edit")
                 return
         
         # Mark as in progress
@@ -446,15 +448,15 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
             
             # Handle 400 Bad Request errors - DO NOT RETRY (these are permanent errors)
             if '400' in error_str or 'bad request' in error_str:
-                logger.warning(f"400 Bad Request on edit_message_text - stopping edits for this message: {e}")
-                # Mark as failed and stop trying (don't send new message, just stop)
+                logger.warning(f"400 Bad Request on edit_message_text - PERMANENTLY stopping edits for message {message_id}: {e}")
+                # Mark as permanently failed - NEVER try again
                 _message_edit_failures[message_id] = 999  # Mark as permanently failed
                 _edit_in_progress[message_id] = False
-                return
+                return  # DO NOT RETRY, DO NOT SEND NEW MESSAGE
             
             # Handle 429 rate limit errors
             if '429' in error_str or 'too many requests' in error_str or 'rate limit' in error_str:
-                logger.warning(f"Rate limit hit on edit_message_text")
+                logger.warning(f"Rate limit hit on edit_message_text for {message_id}")
                 if rate_limiter:
                     # Extract retry_after if available
                     retry_after = None
@@ -468,33 +470,21 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
                 # Mark as failed and stop trying
                 _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
                 _edit_in_progress[message_id] = False
-                return
+                return  # DO NOT RETRY
             
-            # Handle other errors
-            logger.warning(f"Error editing message: {e}")
+            # Handle other BadRequest errors
+            logger.warning(f"BadRequest error editing message {message_id}: {e}")
             _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
             _edit_in_progress[message_id] = False
-            return
+            return  # DO NOT RETRY
             
         except Exception as e:
             # Handle any other unexpected errors
-            logger.error(f"Unexpected error in safe_edit_message_text: {e}", exc_info=True)
+            logger.error(f"Unexpected error in safe_edit_message_text for {message_id}: {e}", exc_info=True)
             if message_id:
                 _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
                 _edit_in_progress[message_id] = False
-            return
-            logger.warning(f"Edit failed, sending new message instead: {e}")
-            try:
-                if hasattr(query, 'message') and query.message:
-                    await query.message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
-                elif hasattr(query, 'effective_message') and query.effective_message:
-                    await query.effective_message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
-                if rate_limiter:
-                    rate_limiter.record_message_sent()
-                if message_id:
-                    with _message_edit_lock:
-                        _message_edit_failures[message_id] = 0  # Reset on successful send
-            except Exception as send_error:
+            return  # DO NOT RETRY, DO NOT FALLBACK
                 logger.warning(f"Failed to send message after edit failure: {send_error}")
             return
         except Exception as e:
