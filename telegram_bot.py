@@ -7298,6 +7298,36 @@ def main():
         cleanup_service.start()
         logger.info("Memory cleanup service started (3-day retention)")
     
+    # Start job worker for background job processing with streaming
+    try:
+        from job_worker import get_job_worker
+        from database_hybrid import Database
+        job_worker = get_job_worker(Database(), application)
+        
+        async def start_job_worker():
+            await job_worker.start()
+            logger.info("Job worker started - background streaming enabled")
+        
+        # Start worker when application starts
+        async def start_workers_on_init(app: Application) -> None:
+            await asyncio.sleep(1)  # Wait for app to fully initialize
+            asyncio.create_task(start_job_worker())
+        
+        # Integrate with existing post_init if it exists
+        original_post_init = getattr(application, 'post_init', None)
+        if original_post_init:
+            async def combined_post_init(app: Application) -> None:
+                await original_post_init(app)
+                await start_workers_on_init(app)
+            application.post_init = combined_post_init
+        else:
+            application.post_init = start_workers_on_init
+        
+        logger.info("Job worker will start on application initialization")
+    except Exception as e:
+        logger.warning(f"Could not initialize job worker: {e}")
+        logger.warning("Bot will continue without background job processing")
+    
     # Start project cleanup service (3-day retention)
     try:
         from project_manager import ProjectManager
