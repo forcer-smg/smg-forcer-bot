@@ -559,12 +559,9 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
                 with _message_edit_lock:
                     _message_edit_failures[message_id] = _message_edit_failures.get(message_id, 0) + 1
             
-            # Exponential backoff for retries (but shorter delays)
-            if attempt < max_retries - 1:
-                wait_time = (2 ** attempt) * 0.2  # 0.2s, 0.4s
-                await asyncio.sleep(wait_time)
-            else:
-                # Last attempt failed - send new message instead of editing
+            # Stop immediately - don't retry (prevents API spam)
+            # Send new message instead of editing
+            logger.warning(f"Edit failed, sending new message instead: {e}")
                 try:
                     if hasattr(query, 'message') and query.message:
                         await query.message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
