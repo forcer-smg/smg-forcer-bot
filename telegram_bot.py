@@ -5331,16 +5331,18 @@ If you believe this is an error, please contact support.
                         logger.info(f"Using saved user data: {user_data}")
                     
                     # Then, extract/override from current message
-                    # Extract name - more flexible patterns
-                    name_match = re.search(r'(?:name[:\s]+)?([A-Z][A-Z\s]{2,})', user_message)
+                    # Extract name - prioritize "Name:" pattern, then first line
+                    name_match = re.search(r'(?:^|\n)\s*name[:\s]+([A-Z][A-Za-z\s]{2,})(?:\n|$)', user_message, re.I | re.MULTILINE)
                     if not name_match:
-                        # Try to find name at start of message (all caps or title case)
-                        name_match = re.search(r'^([A-Z][A-Z\s]+)', user_message)
+                        # Try pattern without "Name:" keyword (first capitalized words)
+                        name_match = re.search(r'^([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+)', user_message, re.MULTILINE)
                     if name_match:
                         name = name_match.group(1).strip().upper()
                         # Remove "NAME" keyword if present
                         name = re.sub(r'^NAME\s+', '', name, flags=re.I)
-                        user_data['name'] = name
+                        # Don't use if it's just "DOB" or other keywords
+                        if name and name not in ['DOB', 'ADDRESS', 'LICENSE', 'EXPIRATION', 'ISSUE', 'SEX', 'HEIGHT', 'WEIGHT', 'CLASS', 'RESTRICTIONS']:
+                            user_data['name'] = name
                     
                     # Extract DOB
                     dob_match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', user_message)
@@ -5385,21 +5387,54 @@ If you believe this is an error, please contact support.
                             if zip_code:
                                 user_data['zip'] = zip_code
                     
-                    # Check database for Texas template
+                    # Detect which state ID the user wants from message
+                    state_keywords = {
+                        'texas': ['texas', 'tx'],
+                        'florida': ['florida', 'fl'],
+                        'california': ['california', 'ca'],
+                        'new york': ['new york', 'ny', 'newyork'],
+                        'illinois': ['illinois', 'il'],
+                        'ohio': ['ohio', 'oh'],
+                        'pennsylvania': ['pennsylvania', 'pa'],
+                        'georgia': ['georgia', 'ga'],
+                        'michigan': ['michigan', 'mi']
+                    }
+                    
+                    requested_state = None
+                    for state, keywords in state_keywords.items():
+                        if any(keyword in message_lower for keyword in keywords):
+                            requested_state = state
+                            break
+                    
+                    # Also check user_data for state
+                    if not requested_state and user_data.get('state'):
+                        state_abbr = user_data['state'].upper()
+                        state_map = {'TX': 'texas', 'FL': 'florida', 'CA': 'california', 'NY': 'new york', 
+                                    'IL': 'illinois', 'OH': 'ohio', 'PA': 'pennsylvania', 'GA': 'georgia', 'MI': 'michigan'}
+                        if state_abbr in state_map:
+                            requested_state = state_map[state_abbr]
+                    
+                    # Default to Texas if no state specified
+                    if not requested_state:
+                        requested_state = 'texas'
+                    
+                    # Check database for the requested state template
                     from template_manager import get_template_manager
                     tm = get_template_manager(db)
                     
-                    # Search for Texas ID template
+                    # Search for state-specific ID template
                     template = None
-                    all_templates = tm.list_templates()
+                    all_templates = tm.list_templates(template_type='id')
                     for t in all_templates:
                         if isinstance(t, dict):
                             name = t.get('name', '').lower()
-                            if 'texas' in name or ('id' in name and 'texas' in message_lower):
+                            desc = t.get('description', '').lower()
+                            # Check if template matches requested state
+                            if requested_state in name or requested_state in desc:
                                 template = t
                                 break
                     
-                    # If no template found, try to get any ID template
+                    # If no state-specific template found, try to get any ID template
                     if not template:
                         for t in all_templates:
                             if isinstance(t, dict):
@@ -5408,7 +5443,19 @@ If you believe this is an error, please contact support.
                                     template = t
                                     break
                     
-                    template_name = template.get('name', 'texas_dl') if template else 'texas_dl'
+                    # Generate template name based on state
+                    template_name_map = {
+                        'texas': 'texas_dl',
+                        'florida': 'florida_dl',
+                        'california': 'california_dl',
+                        'new york': 'newyork_id',
+                        'illinois': 'illinois_dl',
+                        'ohio': 'ohio_dl',
+                        'pennsylvania': 'pennsylvania_dl',
+                        'georgia': 'georgia_dl',
+                        'michigan': 'michigan_dl'
+                    }
+                    template_name = template.get('name', template_name_map.get(requested_state, 'texas_dl')) if template else template_name_map.get(requested_state, 'texas_dl')
                     
                     # Save user data to state for persistence
                     try:
@@ -5420,7 +5467,8 @@ If you believe this is an error, please contact support.
                         logger.warning(f"Could not save user data to state: {e}")
                     
                     # Generate ID
-                    await update.message.reply_text("🔄 Detected photo + ID data! Generating Texas ID...")
+                    state_display = requested_state.replace('_', ' ').title() if requested_state else 'ID'
+                    await update.message.reply_text(f"🔄 Detected photo + ID data! Generating {state_display} ID...")
                     
                     from id_template_processor import get_id_processor
                     id_processor = get_id_processor()
@@ -5437,7 +5485,7 @@ If you believe this is an error, please contact support.
                             await update.message.reply_document(
                                 document=f,
                                 filename=PathLib(filepath).name,
-                                caption=f"✅ **Texas ID Generated**\n\n"
+                                caption=f"✅ **{state_display} ID Generated**\n\n"
                                        f"Name: {user_data.get('name', 'N/A')}\n"
                                        f"DOB: {user_data.get('dob', 'N/A')}\n"
                                        f"Address: {user_data.get('address', 'N/A')}"
