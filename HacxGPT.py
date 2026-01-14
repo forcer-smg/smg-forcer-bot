@@ -629,7 +629,14 @@ TASK COMPLETION REQUIREMENTS:
 ✅ If a command creates a file, immediately use it in the next step
 ✅ If a script is created, immediately execute it and show results
 ✅ If processing a template, complete ALL steps: check database → use template → process → generate → verify → deliver
-✅ For ID/document generation: check database → template → photo → overlay → text → test → final output - DO IT ALL
+✅ For ID/document generation: 
+   1. CHECK STATE FIRST: Load saved photo and user data from user_state_manager
+   2. CHECK DATABASE: Query template_manager for templates
+   3. USE REAL TEMPLATES: Use actual PSD templates from database, not placeholders
+   4. PROCESS: template → photo → overlay → text → test → final output
+   5. VERIFY: Check file exists and has content before returning
+   6. SAVE STATE: Save generated file path and mark result as delivered
+   7. SEND FILE: Actually send the file to user via Telegram - DO NOT JUST RETURN PATH
 ✅ NO "what's the update" needed - just keep going until done
 ✅ TEST EVERYTHING: Verify files exist, scripts run, services start before proceeding
 ✅ RETRY ON FAILURE: If something fails, try alternative approach automatically

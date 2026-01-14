@@ -6,6 +6,7 @@ Handles Texas ID and other ID templates with image overlay
 
 import os
 import logging
+import time
 from typing import Dict, Optional, Tuple
 from pathlib import Path
 import json
@@ -89,11 +90,17 @@ class IDTemplateProcessor:
                 return None
             
             # Save generated ID
-            output_filename = f"texas_id_{Path(photo_path).stem}.png"
+            output_filename = f"texas_id_{Path(photo_path).stem}_{int(time.time())}.png"
             output_path = self.output_dir / output_filename
             id_image.save(str(output_path), 'PNG', quality=95)
             
-            logger.info(f"Texas ID generated: {output_path}")
+            logger.info(f"Texas ID generated: {output_path} (size: {output_path.stat().st_size} bytes)")
+            
+            # Verify file was actually created
+            if not output_path.exists() or output_path.stat().st_size == 0:
+                logger.error(f"Generated ID file is empty or doesn't exist: {output_path}")
+                return None
+            
             return str(output_path)
             
         except Exception as e:

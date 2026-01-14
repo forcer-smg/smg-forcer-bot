@@ -4853,7 +4853,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.debug(f"Empty message from user {user_id}, skipping")
         return
     
-    # RESTORE STATE: Check for pending tasks from previous session
+    # RESTORE STATE: Check for pending tasks and saved data from previous session
     try:
         from user_state_manager import get_user_state_manager
         from continuous_executor import get_continuous_executor
@@ -4861,35 +4861,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state_mgr = get_user_state_manager(db)
         continuous_exec = get_continuous_executor()
         
+        # Get ALL saved state for this user
+        all_state = state_mgr.get_all_user_state(user_id)
+        
+        # Restore saved photo if exists
+        if 'last_photo' in all_state:
+            photo_state = all_state['last_photo']
+            photo_path = photo_state.get('value', {}).get('path')
+            if photo_path and Path(photo_path).exists():
+                context.user_data['last_photo'] = photo_path
+                context.user_data['last_photo_time'] = photo_state.get('last_updated')
+                logger.info(f"Restored saved photo: {photo_path}")
+        
+        # Restore saved user data (name, DOB, address, etc.)
+        if 'user_data' in all_state:
+            user_data_state = all_state['user_data']
+            saved_user_data = user_data_state.get('value', {})
+            if saved_user_data:
+                context.user_data['saved_user_data'] = saved_user_data
+                logger.info(f"Restored saved user data: {saved_user_data}")
+        
+        # Restore current project
+        if 'current_project' in all_state:
+            current_project = all_state['current_project'].get('value', {})
+            if current_project:
+                context.user_data['current_project'] = current_project
+                logger.info(f"Restored current project: {current_project.get('project_name')}")
+        
         # Check for pending task
         pending_task = continuous_exec.check_and_resume_task(user_id)
         if pending_task:
             task_desc = pending_task.get('task_description', '')
             # If user is asking about their work, restore context
-            if any(keyword in user_message.lower() for keyword in ['project', 'working', 'doing', 'id project', 'continue', 'resume']):
+            if any(keyword in user_message.lower() for keyword in ['project', 'working', 'doing', 'id project', 'continue', 'resume', 'remember', 'were working']):
+                restored_info = []
+                if context.user_data.get('last_photo'):
+                    restored_info.append("✅ Photo found")
+                if context.user_data.get('saved_user_data'):
+                    restored_info.append(f"✅ User data: {context.user_data['saved_user_data'].get('name', 'N/A')}")
+                if current_project:
+                    restored_info.append(f"✅ Project: {current_project.get('project_name')}")
+                
                 await update.message.reply_text(
                     f"📋 **Resuming Previous Task:**\n\n"
                     f"Task: {task_desc}\n"
                     f"Status: {pending_task.get('status', 'pending')}\n"
-                    f"Expected Results: {', '.join(pending_task.get('expected_results', []))}\n\n"
+                    f"{chr(10).join(restored_info) if restored_info else '⚠️ No saved data found'}\n\n"
                     f"🔄 Continuing execution...",
                     parse_mode='Markdown'
                 )
-                # Will continue with normal execution which should complete the task
     except Exception as e:
-        logger.warning(f"Could not restore state: {e}")
-    
-    # RESTORE WORKSPACE STATE: Load current project info
-    try:
-        from user_state_manager import get_user_state_manager
-        state_mgr = get_user_state_manager(db)
-        current_project = state_mgr.get_current_project(user_id)
-        if current_project:
-            # Store in context for AI to use
-            context.user_data['current_project'] = current_project
-            logger.info(f"Restored current project for user {user_id}: {current_project.get('project_name')}")
-    except Exception as e:
-        logger.warning(f"Could not restore project state: {e}")
+        logger.warning(f"Could not restore state: {e}", exc_info=True)
     
     # Log user message for training data collection
     try:
@@ -4928,7 +4950,20 @@ If you believe this is an error, please contact support.
         return
     
     # AUTO-DETECT: Check if user has photo + ID data and wants to generate ID
+    # First check context, then check saved state
     user_photo = context.user_data.get('last_photo')
+    if not user_photo:
+        # Try to restore from saved state
+        try:
+            from user_state_manager import get_user_state_manager
+            state_mgr = get_user_state_manager(db)
+            photo_state = state_mgr.get_state(user_id, 'last_photo')
+            if photo_state and photo_state.get('value', {}).get('path'):
+                user_photo = photo_state['value']['path']
+                context.user_data['last_photo'] = user_photo
+        except Exception as e:
+            logger.warning(f"Could not restore photo from state: {e}")
+    
     if user_photo and Path(user_photo).exists():
         # Check if message contains ID-related keywords or data
         message_lower = user_message.lower()
