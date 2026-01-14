@@ -490,60 +490,6 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
                 _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
                 _edit_in_progress[message_id] = False
             return
-            if 'message is not modified' in error_str:
-                # Content unchanged - cache and return
-                if message_id:
-                    with _message_edit_lock:
-                        _message_edit_cache[message_id] = text
-                        _message_edit_times[message_id] = time.time()
-                return
-            
-            if 'message to edit not found' in error_str or 'message can\'t be edited' in error_str:
-                # Message can't be edited - send new message instead
-                try:
-                    if hasattr(query, 'message') and query.message:
-                        await query.message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
-                    elif hasattr(query, 'effective_message') and query.effective_message:
-                        await query.effective_message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
-                    if message_id:
-                        with _message_edit_lock:
-                            _message_edit_failures[message_id] = 0  # Reset on successful send
-                except Exception:
-                    pass
-                return
-            
-            # Handle Markdown parsing errors
-            if 'parse' in error_str or 'entity' in error_str:
-                # Try with escaped text
-                try:
-                    escaped_text = tg_escape_markdown(text, version=2)
-                    await query.edit_message_text(escaped_text, parse_mode=parse_mode, **kwargs)
-                    if message_id:
-                        with _message_edit_lock:
-                            _message_edit_cache[message_id] = text
-                            _message_edit_times[message_id] = time.time()
-                            _message_edit_failures[message_id] = 0
-                    return
-                except Exception:
-                    # If escaping also fails, try plain text
-                    try:
-                        await query.edit_message_text(text[:4000], parse_mode=None, **kwargs)
-                        if message_id:
-                            with _message_edit_lock:
-                                _message_edit_cache[message_id] = text
-                                _message_edit_times[message_id] = time.time()
-                                _message_edit_failures[message_id] = 0
-                        return
-                    except Exception:
-                        pass
-            
-            # Increment failure count
-            if message_id:
-                with _message_edit_lock:
-                    _message_edit_failures[message_id] = _message_edit_failures.get(message_id, 0) + 1
-            
-            # Stop immediately - don't retry (prevents API spam)
-            # Send new message instead of editing
             logger.warning(f"Edit failed, sending new message instead: {e}")
             try:
                 if hasattr(query, 'message') and query.message:
