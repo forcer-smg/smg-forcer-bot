@@ -562,18 +562,19 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
             # Stop immediately - don't retry (prevents API spam)
             # Send new message instead of editing
             logger.warning(f"Edit failed, sending new message instead: {e}")
-                try:
-                    if hasattr(query, 'message') and query.message:
-                        await query.message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
-                    elif hasattr(query, 'effective_message') and query.effective_message:
-                        await query.effective_message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
-                    if message_id:
-                        with _message_edit_lock:
-                            _message_edit_failures[message_id] = 0  # Reset on successful send
-                except Exception:
-                    pass
-                except Exception as send_error:
-                    logger.warning(f"Failed to send message after edit failure: {send_error}")
+            try:
+                if hasattr(query, 'message') and query.message:
+                    await query.message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
+                elif hasattr(query, 'effective_message') and query.effective_message:
+                    await query.effective_message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
+                if rate_limiter:
+                    rate_limiter.record_message_sent()
+                if message_id:
+                    with _message_edit_lock:
+                        _message_edit_failures[message_id] = 0  # Reset on successful send
+            except Exception as send_error:
+                logger.warning(f"Failed to send message after edit failure: {send_error}")
+            return
         except Exception as e:
             last_error = e
             if attempt < max_retries - 1:
