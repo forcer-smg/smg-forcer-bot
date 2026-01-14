@@ -4558,25 +4558,55 @@ async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
         MAX_FILE_SIZE = 1024 * 1024  # 1MB
         MAX_PDF_SIZE = 10 * 1024 * 1024  # 10MB for PDFs
         
-        # Detect file type - check document types first, then code/text
+        # Detect file type - check MIME type first (most reliable), then extension, then magic bytes
         file_type = 'unknown'
         
-        # Document types
-        document_extensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp']
-        archive_extensions = ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz']
-        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico', '.tiff', '.tif']
-        video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.mpg', '.mpeg']
-        audio_extensions = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a']
+        # Check MIME type first (from Telegram) - most reliable
+        if mime_type:
+            mime_lower = mime_type.lower()
+            if 'pdf' in mime_lower:
+                file_type = 'pdf'
+            elif 'word' in mime_lower or 'document' in mime_lower or 'docx' in mime_lower or 'msword' in mime_lower:
+                file_type = 'word'
+            elif 'excel' in mime_lower or 'spreadsheet' in mime_lower or 'xlsx' in mime_lower or 'ms-excel' in mime_lower:
+                file_type = 'excel'
+            elif 'powerpoint' in mime_lower or 'presentation' in mime_lower or 'pptx' in mime_lower or 'ms-powerpoint' in mime_lower:
+                file_type = 'powerpoint'
+            elif 'image' in mime_lower:
+                file_type = 'image'
+            elif 'video' in mime_lower:
+                file_type = 'video'
+            elif 'audio' in mime_lower:
+                file_type = 'audio'
+            elif 'zip' in mime_lower or 'archive' in mime_lower or 'compressed' in mime_lower:
+                file_type = 'archive'
+            elif 'text' in mime_lower or 'plain' in mime_lower:
+                file_type = 'text'
+            elif 'json' in mime_lower:
+                file_type = 'config'
+            elif 'javascript' in mime_lower or 'js' in mime_lower:
+                file_type = 'javascript'
+            elif 'python' in mime_lower or 'py' in mime_lower:
+                file_type = 'python'
         
-        # Code extensions
-        code_extensions = ['.py', '.pyw', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', 
-                          '.hpp', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.scala', '.sh', 
-                          '.bash', '.zsh', '.sql', '.html', '.css', '.scss', '.less', '.vue', '.svelte']
-        config_extensions = ['.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.conf', '.env']
-        text_extensions = ['.txt', '.md', '.markdown', '.rst', '.log']
-        
-        # Check file type by extension
-        if file_ext in document_extensions:
+        # If MIME type didn't help, check extension
+        if file_type == 'unknown':
+            # Document types
+            document_extensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp']
+            archive_extensions = ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz']
+            image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico', '.tiff', '.tif']
+            video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.mpg', '.mpeg']
+            audio_extensions = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a']
+            
+            # Code extensions
+            code_extensions = ['.py', '.pyw', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', 
+                              '.hpp', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.scala', '.sh', 
+                              '.bash', '.zsh', '.sql', '.html', '.css', '.scss', '.less', '.vue', '.svelte']
+            config_extensions = ['.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.conf', '.env']
+            text_extensions = ['.txt', '.md', '.markdown', '.rst', '.log']
+            
+            # Check file type by extension
+            if file_ext in document_extensions:
             if file_ext == '.pdf':
                 file_type = 'pdf'
             elif file_ext in ['.doc', '.docx']:
