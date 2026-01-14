@@ -4631,6 +4631,20 @@ You've used all your available requests.
             )
             
             try:
+                # Store task information for summary generation
+                context.user_data['task_start_time'] = time.time()
+                context.user_data['last_task_description'] = user_message
+                context.user_data['last_task_results'] = {}
+                
+                # Create progress streamer for long tasks
+                try:
+                    from progress_streamer import create_progress_streamer
+                    progress_streamer = create_progress_streamer(update=update, context=context, update_interval=15)
+                    context.user_data['progress_streamer'] = progress_streamer
+                except Exception as e:
+                    logger.warning(f"Could not create progress streamer: {e}")
+                    progress_streamer = None
+                
                 # Handle with concurrency management for 500+ users
                 if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
                     async def process_message():
@@ -4651,6 +4665,10 @@ You've used all your available requests.
                         update,
                         context
                     )
+                
+                # Update task results if available
+                if hasattr(desktop_handler, 'last_task_results'):
+                    context.user_data['last_task_results'] = desktop_handler.last_task_results
                 
                 # Store AI response in secure memory (with vector embeddings if available)
                 # Use timeout to prevent hanging on slow memory operations
