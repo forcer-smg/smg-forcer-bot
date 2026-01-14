@@ -5332,17 +5332,20 @@ If you believe this is an error, please contact support.
                     
                     # Then, extract/override from current message
                     # Extract name - prioritize "Name:" pattern, then first line
-                    name_match = re.search(r'(?:^|\n)\s*name[:\s]+([A-Z][A-Za-z\s]{2,})(?:\n|$)', user_message, re.I | re.MULTILINE)
+                    # Pattern: "Name: Dawn Price" - match everything after "Name:" until newline
+                    name_match = re.search(r'(?:^|\n)\s*name[:\s]+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+)', user_message, re.I | re.MULTILINE)
                     if not name_match:
-                        # Try pattern without "Name:" keyword (first capitalized words)
+                        # Try pattern without "Name:" keyword (first capitalized words at start)
                         name_match = re.search(r'^([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+)', user_message, re.MULTILINE)
                     if name_match:
                         name = name_match.group(1).strip().upper()
                         # Remove "NAME" keyword if present
                         name = re.sub(r'^NAME\s+', '', name, flags=re.I)
-                        # Don't use if it's just "DOB" or other keywords
-                        if name and name not in ['DOB', 'ADDRESS', 'LICENSE', 'EXPIRATION', 'ISSUE', 'SEX', 'HEIGHT', 'WEIGHT', 'CLASS', 'RESTRICTIONS']:
+                        # Don't use if it's just "DOB" or other keywords, and require at least 2 words
+                        excluded_keywords = ['DOB', 'ADDRESS', 'LICENSE', 'EXPIRATION', 'ISSUE', 'SEX', 'HEIGHT', 'WEIGHT', 'CLASS', 'RESTRICTIONS', 'DATE']
+                        if name and name not in excluded_keywords and len(name.split()) >= 2:
                             user_data['name'] = name
+                            logger.info(f"Extracted name: {name}")
                     
                     # Extract DOB
                     dob_match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', user_message)
