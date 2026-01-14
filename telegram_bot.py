@@ -4889,6 +4889,116 @@ If you believe this is an error, please contact support.
             pass
         return
     
+    # AUTO-DETECT: Check if user has photo + ID data and wants to generate ID
+    user_photo = context.user_data.get('last_photo')
+    if user_photo and Path(user_photo).exists():
+        # Check if message contains ID-related keywords or data
+        message_lower = user_message.lower()
+        id_keywords = ['texas', 'id', 'driver', 'license', 'dl', 'identification']
+        has_id_keyword = any(keyword in message_lower for keyword in id_keywords)
+        
+        # Check if message looks like ID data (name, DOB, address pattern)
+        import re
+        has_name = bool(re.search(r'name[:\s]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)', user_message, re.I))
+        has_dob = bool(re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', user_message))
+        has_address = bool(re.search(r'\d+\s+[A-Z][a-z]+.*(?:st|rd|ave|road|street)', user_message, re.I))
+        
+        # If user mentions ID or has ID data pattern, auto-generate
+        if has_id_keyword or (has_name and (has_dob or has_address)):
+            try:
+                # Extract user data from message
+                user_data = {}
+                
+                # Extract name
+                name_match = re.search(r'name[:\s]+([^\n,]+)', user_message, re.I)
+                if not name_match:
+                    # Try to find name pattern (First Last or FIRST LAST)
+                    name_match = re.search(r'^([A-Z][A-Z\s]+)', user_message)
+                if name_match:
+                    user_data['name'] = name_match.group(1).strip().upper()
+                
+                # Extract DOB
+                dob_match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', user_message)
+                if dob_match:
+                    month, day, year = dob_match.groups()
+                    if len(year) == 2:
+                        year = '20' + year if int(year) < 50 else '19' + year
+                    user_data['dob'] = f"{month}/{day}/{year}"
+                
+                # Extract address
+                address_match = re.search(r'(\d+\s+[A-Z][a-z]+.*?)(?:,\s*([A-Z][a-z]+))?(?:,\s*([A-Z]{2}))?(?:\s+(\d{5}))?', user_message, re.I)
+                if address_match:
+                    street = address_match.group(1).strip()
+                    city = address_match.group(2).strip() if address_match.group(2) else ""
+                    state = address_match.group(3).strip() if address_match.group(3) else ""
+                    zip_code = address_match.group(4).strip() if address_match.group(4) else ""
+                    user_data['address'] = street
+                    if city:
+                        user_data['city'] = city
+                    if state:
+                        user_data['state'] = state
+                    if zip_code:
+                        user_data['zip'] = zip_code
+                
+                # Check database for Texas template
+                from template_manager import get_template_manager
+                tm = get_template_manager(db)
+                
+                # Search for Texas ID template
+                template = None
+                all_templates = tm.list_templates()
+                for t in all_templates:
+                    if isinstance(t, dict):
+                        name = t.get('name', '').lower()
+                        if 'texas' in name or ('id' in name and 'texas' in message_lower):
+                            template = t
+                            break
+                
+                # If no template found, try to get any ID template
+                if not template:
+                    for t in all_templates:
+                        if isinstance(t, dict):
+                            name = t.get('name', '').lower()
+                            if 'id' in name or 'driver' in name or 'license' in name:
+                                template = t
+                                break
+                
+                template_name = template.get('name', 'texas_dl') if template else 'texas_dl'
+                
+                # Generate ID
+                await update.message.reply_text("🔄 Detected photo + ID data! Generating Texas ID...")
+                
+                from id_template_processor import get_id_processor
+                id_processor = get_id_processor()
+                
+                filepath = id_processor.process_texas_id_with_photo(
+                    user_photo,
+                    template_name=template_name,
+                    user_data=user_data
+                )
+                
+                if filepath and Path(filepath).exists():
+                    # Send the generated ID
+                    with open(filepath, 'rb') as f:
+                        await update.message.reply_document(
+                            document=f,
+                            filename=Path(filepath).name,
+                            caption=f"✅ **Texas ID Generated**\n\n"
+                                   f"Name: {user_data.get('name', 'N/A')}\n"
+                                   f"DOB: {user_data.get('dob', 'N/A')}\n"
+                                   f"Address: {user_data.get('address', 'N/A')}"
+                        )
+                    logger.info(f"Auto-generated and sent ID: {filepath}")
+                    # Clear photo from context after successful generation
+                    del context.user_data['last_photo']
+                    return
+                else:
+                    logger.warning(f"ID generation failed, filepath: {filepath}")
+                    # Continue to normal message handling
+            except Exception as e:
+                logger.error(f"Error auto-generating ID: {e}", exc_info=True)
+                # Continue to normal message handling
+    
     # Check if admin is searching for a user by ID
     pending_search_key = f'pending_search_{user_id}'
     if pending_search_key in context.user_data:

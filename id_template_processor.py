@@ -57,11 +57,20 @@ class IDTemplateProcessor:
             return None
         
         try:
-            # Load template
+            # Load template - checks database first, then local files
             template_path = self._find_template(template_name)
             if not template_path:
-                logger.error(f"Template not found: {template_name}")
-                return None
+                logger.warning(f"Template not found: {template_name}, trying alternative names")
+                # Try alternative template names
+                for alt_name in ['texas_dl', 'texas_id', 'texas_driver_license', 'texas_dl_psd']:
+                    template_path = self._find_template(alt_name)
+                    if template_path:
+                        logger.info(f"Found template with alternative name: {alt_name}")
+                        break
+                
+                if not template_path:
+                    logger.error(f"No Texas template found in database or local files")
+                    return None
             
             # Load photo
             if not Path(photo_path).exists():
@@ -92,7 +101,48 @@ class IDTemplateProcessor:
             return None
     
     def _find_template(self, template_name: str) -> Optional[Path]:
-        """Find template file"""
+        """Find template file - checks database first, then local files"""
+        # FIRST: Check database for template
+        try:
+            from template_manager import get_template_manager
+            from database_hybrid import Database
+            
+            db = Database()
+            tm = get_template_manager(db)
+            
+            # Search for template in database
+            template = None
+            
+            # Try exact name match first
+            template = tm.get_template(name=template_name)
+            
+            # If not found, search for Texas/ID templates
+            if not template:
+                all_templates = tm.list_templates()
+                for t in all_templates:
+                    if isinstance(t, dict):
+                        name = t.get('name', '').lower()
+                        if 'texas' in name or 'tx' in name or 'id' in name or 'driver' in name:
+                            template = t
+                            break
+            
+            # If template found in database, use its file_path
+            if template and isinstance(template, dict):
+                file_path = template.get('file_path')
+                if file_path and Path(file_path).exists():
+                    logger.info(f"Found template in database: {file_path}")
+                    return Path(file_path)
+                # Also check template_data for file_path
+                template_data = template.get('template_data', {})
+                if isinstance(template_data, dict):
+                    file_path = template_data.get('file_path')
+                    if file_path and Path(file_path).exists():
+                        logger.info(f"Found template file_path in template_data: {file_path}")
+                        return Path(file_path)
+        except Exception as e:
+            logger.warning(f"Could not check database for template: {e}")
+        
+        # FALLBACK: Check local files
         # Check processed templates first
         processed_dir = self.templates_dir / "processed"
         metadata_path = processed_dir / f"{template_name}_metadata.json"
