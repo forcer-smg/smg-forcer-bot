@@ -4544,7 +4544,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 
-async def analyze_uploaded_file(file_path: str) -> Dict:
+async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
     """Analyze uploaded file and return full content + summary"""
     try:
         path = Path(file_path)
@@ -4554,35 +4554,115 @@ async def analyze_uploaded_file(file_path: str) -> Dict:
         file_size = path.stat().st_size
         file_ext = path.suffix.lower()
         
-        # Maximum file size for reading (1MB for code files)
+        # Maximum file size for reading (1MB for code files, 10MB for PDFs)
         MAX_FILE_SIZE = 1024 * 1024  # 1MB
+        MAX_PDF_SIZE = 10 * 1024 * 1024  # 10MB for PDFs
         
-        # Detect file type
+        # Detect file type - check document types first, then code/text
         file_type = 'unknown'
+        
+        # Document types
+        document_extensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp']
+        archive_extensions = ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz']
+        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico', '.tiff', '.tif']
+        video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.mpg', '.mpeg']
+        audio_extensions = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a']
+        
+        # Code extensions
         code_extensions = ['.py', '.pyw', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', 
                           '.hpp', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.scala', '.sh', 
                           '.bash', '.zsh', '.sql', '.html', '.css', '.scss', '.less', '.vue', '.svelte']
         config_extensions = ['.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.conf', '.env']
         text_extensions = ['.txt', '.md', '.markdown', '.rst', '.log']
         
-        if file_ext in code_extensions:
+        # Check file type by extension
+        if file_ext in document_extensions:
+            if file_ext == '.pdf':
+                file_type = 'pdf'
+            elif file_ext in ['.doc', '.docx']:
+                file_type = 'word'
+            elif file_ext in ['.xls', '.xlsx']:
+                file_type = 'excel'
+            elif file_ext in ['.ppt', '.pptx']:
+                file_type = 'powerpoint'
+            else:
+                file_type = 'document'
+        elif file_ext in archive_extensions:
+            file_type = 'archive'
+        elif file_ext in image_extensions:
+            file_type = 'image'
+        elif file_ext in video_extensions:
+            file_type = 'video'
+        elif file_ext in audio_extensions:
+            file_type = 'audio'
+        elif file_ext in code_extensions:
             file_type = 'code'
+            # More specific types
+            if file_ext in ['.py', '.pyw']:
+                file_type = 'python'
+            elif file_ext in ['.js', '.ts', '.jsx', '.tsx']:
+                file_type = 'javascript'
+            elif file_ext in ['.sh', '.bash', '.zsh']:
+                file_type = 'shell'
         elif file_ext in config_extensions:
             file_type = 'config'
         elif file_ext in text_extensions:
             file_type = 'text'
-        elif file_ext in ['.py', '.pyw']:
-            file_type = 'python'
-        elif file_ext in ['.js', '.ts', '.jsx', '.tsx']:
-            file_type = 'javascript'
-        elif file_ext in ['.sh', '.bash', '.zsh']:
-            file_type = 'shell'
         else:
             file_type = 'unknown'
         
+        # Also check file magic bytes for better detection (especially for PDFs)
+        if file_type == 'unknown' or file_ext == '':
+            try:
+                with open(file_path, 'rb') as f:
+                    header = f.read(16)
+                    # PDF magic bytes: %PDF
+                    if header.startswith(b'%PDF'):
+                        file_type = 'pdf'
+                    # ZIP-based formats (docx, xlsx, etc.)
+                    elif header.startswith(b'PK\x03\x04'):
+                        if file_ext in ['.docx']:
+                            file_type = 'word'
+                        elif file_ext in ['.xlsx']:
+                            file_type = 'excel'
+                        elif file_ext in ['.pptx']:
+                            file_type = 'powerpoint'
+                        elif file_ext in ['.zip']:
+                            file_type = 'archive'
+                        else:
+                            file_type = 'archive'  # Likely a ZIP-based format
+            except Exception as e:
+                logger.debug(f"Could not read file header for type detection: {e}")
+        
         # Read full file content if it's a text-based file and within size limit
         file_content = None
-        if file_size <= MAX_FILE_SIZE and file_type in ['code', 'python', 'javascript', 'shell', 'text', 'config']:
+        if file_type == 'pdf':
+            # For PDFs, we can't read text directly - would need PyPDF2 or similar
+            # Just mark as PDF type
+            summary += "\n📄 PDF document detected"
+            try:
+                # Try to extract basic info from PDF if PyPDF2 is available
+                try:
+                    import PyPDF2
+                    with open(file_path, 'rb') as f:
+                        pdf_reader = PyPDF2.PdfReader(f)
+                        num_pages = len(pdf_reader.pages)
+                        summary += f"\nPages: {num_pages}"
+                        # Try to extract first page text as preview
+                        if num_pages > 0:
+                            try:
+                                first_page = pdf_reader.pages[0]
+                                preview_text = first_page.extract_text()[:500]
+                                if preview_text:
+                                    file_content = preview_text
+                                    summary += f"\nPreview (first page): {preview_text[:200]}..."
+                            except:
+                                pass
+                except ImportError:
+                    summary += "\n⚠️ PyPDF2 not available - install with: pip install PyPDF2"
+            except Exception as e:
+                logger.debug(f"Could not read PDF: {e}")
+        elif file_size <= MAX_FILE_SIZE and file_type in ['code', 'python', 'javascript', 'shell', 'text', 'config']:
             try:
                 # Try UTF-8 first
                 file_content = path.read_text(encoding='utf-8')
@@ -4813,7 +4893,9 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"File uploaded by user {user_id}: {file_name} -> {file_path}")
         
         # Analyze file and read full content
-        analysis = await analyze_uploaded_file(str(file_path))
+        # Get MIME type from Telegram document if available
+        mime_type = getattr(document, 'mime_type', None)
+        analysis = await analyze_uploaded_file(str(file_path), mime_type=mime_type)
         
         # Store file in context as current file
         if hasattr(context, 'user_data'):
