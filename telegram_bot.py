@@ -4497,7 +4497,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if 'No vision models' in error or 'all failed' in error.lower():
                         await update.message.reply_text(
                             f"📸 **Photo saved!**\n\n"
-                            f"⚠️ Vision analysis unavailable (no API keys configured).\n"
+                            f"ℹ️ Vision analysis is optional (no API keys needed for ID generation).\n"
                             f"✅ Photo is ready for ID generation.\n\n"
                             f"Send your name, DOB, and address to generate your Texas ID."
                         )
@@ -4518,7 +4518,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if 'No vision models' in error or 'all failed' in error.lower():
                         await update.message.reply_text(
                             f"📸 **Photo saved!**\n\n"
-                            f"⚠️ Vision analysis unavailable (no API keys configured).\n"
+                            f"ℹ️ Vision analysis is optional (no API keys needed for ID generation).\n"
                             f"✅ Photo is ready for ID generation.\n\n"
                             f"Send your name, DOB, and address to generate your Texas ID."
                         )
@@ -4531,7 +4531,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if 'No vision models' in str(e) or 'vision' in str(e).lower():
                 await update.message.reply_text(
                     f"📸 **Photo saved!**\n\n"
-                    f"⚠️ Vision analysis unavailable.\n"
+                    f"ℹ️ Vision analysis is optional (no API keys needed for ID generation).\n"
                     f"✅ Photo is ready for ID generation.\n\n"
                     f"Send your name, DOB, and address to generate your Texas ID."
                 )

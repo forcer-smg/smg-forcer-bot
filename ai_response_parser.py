@@ -126,11 +126,23 @@ class AIResponseParser:
                 import os
                 temp_file = None
                 try:
-                    # Create temp file in workspace or system temp
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                    # Create temp file in workspace or system temp (Linux compatible)
+                    # Use /tmp on Linux, or system temp on Windows
+                    import sys
+                    if sys.platform == 'linux' or sys.platform.startswith('linux'):
+                        temp_dir = '/tmp'
+                    else:
+                        temp_dir = tempfile.gettempdir()
+                    
+                    # Create temp file with proper permissions
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir=temp_dir) as f:
                         f.write(code_content)
                         temp_file = f.name
-                    # Execute the temp file
+                        # Make executable on Linux
+                        if sys.platform == 'linux' or sys.platform.startswith('linux'):
+                            os.chmod(temp_file, 0o755)
+                    
+                    # Execute the temp file (use absolute path for Linux)
                     commands.append(f"python3 {temp_file}")
                     # Store temp file path for cleanup (will be handled by command executor)
                 except Exception as e:

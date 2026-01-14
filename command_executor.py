@@ -9,6 +9,7 @@ import subprocess
 import logging
 import psutil
 import time
+import os
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
@@ -134,6 +135,20 @@ class CommandExecutor:
                 result['verification_details'] = verification
             
             logger.info(f"Command executed: {command} (exit_code: {result['exit_code']}, verified: {result['verified']})")
+            
+            # Cleanup temp files (Python scripts)
+            if '.py' in command and '/tmp/' in command:
+                try:
+                    # Extract temp file path from command
+                    import re
+                    temp_match = re.search(r'(/tmp/[^\s]+\.py)', command)
+                    if temp_match:
+                        temp_file = temp_match.group(1)
+                        if Path(temp_file).exists():
+                            os.remove(temp_file)
+                            logger.debug(f"Cleaned up temp file: {temp_file}")
+                except Exception as cleanup_error:
+                    logger.warning(f"Could not cleanup temp file: {cleanup_error}")
             
         except Exception as e:
             result['error'] = str(e)
