@@ -99,6 +99,12 @@ user_sessions_lock = threading.Lock()  # Lock for thread-safe access
 user_rate_limits: Dict[int, float] = {}
 user_rate_limits_lock = threading.Lock()
 
+# Message edit rate limiting and failure tracking
+_message_edit_cache: Dict[str, str] = {}  # message_id -> content
+_message_edit_times: Dict[str, float] = {}  # message_id -> last_edit_time
+_message_edit_failures: Dict[str, int] = {}  # message_id -> consecutive_failures
+_message_edit_lock = threading.Lock()
+
 # Concurrency management for 500+ users
 try:
     from concurrency_manager import get_concurrency_manager, ConcurrencyManager
@@ -338,22 +344,57 @@ async def safe_reply_text(update: Update, text: str, parse_mode: str = 'Markdown
 # Message content cache to prevent duplicate edits
 _message_content_cache: Dict[str, str] = {}
 
-async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', max_retries: int = 3, **kwargs):
+async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', max_retries: int = 2, min_edit_interval: float = 0.5, **kwargs):
     """
     Safely edit a message with Markdown, falling back to plain text if parsing fails.
-    Includes content caching, length checks, and retry logic with backoff.
+    Includes content caching, length checks, rate limiting, and retry logic with backoff.
+    
+    Args:
+        query: Query object (CallbackQuery or Update)
+        text: Text to send
+        parse_mode: Parse mode (default: 'Markdown')
+        max_retries: Maximum retry attempts (default: 2, reduced from 3)
+        min_edit_interval: Minimum seconds between edits for same message (default: 0.5)
+        **kwargs: Additional arguments for edit_message_text
     """
     # Get message ID for caching
     message_id = None
+    chat_id = None
     if hasattr(query, 'message') and query.message:
         message_id = f"{query.message.chat.id}_{query.message.message_id}"
+        chat_id = query.message.chat.id
     elif hasattr(query, 'effective_message') and query.effective_message:
         message_id = f"{query.effective_message.chat.id}_{query.effective_message.message_id}"
+        chat_id = query.effective_message.chat.id
     
     # Check if content is unchanged
-    if message_id and message_id in _message_content_cache:
-        if _message_content_cache[message_id] == text:
+    if message_id and message_id in _message_edit_cache:
+        if _message_edit_cache[message_id] == text:
             return  # Skip unchanged edit
+    
+    # Rate limiting: Check if we've edited this message too recently
+    if message_id:
+        with _message_edit_lock:
+            if message_id in _message_edit_times:
+                time_since_last_edit = time.time() - _message_edit_times[message_id]
+                if time_since_last_edit < min_edit_interval:
+                    # Too soon to edit - skip this edit
+                    return
+            
+            # Check if this message has too many consecutive failures
+            if message_id in _message_edit_failures:
+                if _message_edit_failures[message_id] >= 3:
+                    # Too many failures - stop trying to edit, send new message instead
+                    try:
+                        if hasattr(query, 'message') and query.message:
+                            await query.message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
+                        elif hasattr(query, 'effective_message') and query.effective_message:
+                            await query.effective_message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
+                        # Reset failure count on successful send
+                        _message_edit_failures[message_id] = 0
+                    except Exception:
+                        pass
+                    return
     
     # Check message length (Telegram limit is 4096 chars)
     if len(text) > 4000:
@@ -367,7 +408,10 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
             await query.edit_message_text(text, parse_mode=parse_mode, **kwargs)
             # Cache successful edit
             if message_id:
-                _message_content_cache[message_id] = text
+                with _message_edit_lock:
+                    _message_edit_cache[message_id] = text
+                    _message_edit_times[message_id] = time.time()
+                    _message_edit_failures[message_id] = 0  # Reset failure count on success
             return
         except BadRequest as e:
             last_error = e
@@ -377,47 +421,71 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
             if 'message is not modified' in error_str:
                 # Content unchanged - cache and return
                 if message_id:
-                    _message_content_cache[message_id] = text
+                    with _message_edit_lock:
+                        _message_edit_cache[message_id] = text
+                        _message_edit_times[message_id] = time.time()
                 return
             
             if 'message to edit not found' in error_str or 'message can\'t be edited' in error_str:
                 # Message can't be edited - send new message instead
-                if hasattr(query, 'message') and query.message:
-                    await query.message.reply_text(text, parse_mode=parse_mode, **kwargs)
-                elif hasattr(query, 'effective_message') and query.effective_message:
-                    await query.effective_message.reply_text(text, parse_mode=parse_mode, **kwargs)
+                try:
+                    if hasattr(query, 'message') and query.message:
+                        await query.message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
+                    elif hasattr(query, 'effective_message') and query.effective_message:
+                        await query.effective_message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
+                    if message_id:
+                        with _message_edit_lock:
+                            _message_edit_failures[message_id] = 0  # Reset on successful send
+                except Exception:
+                    pass
                 return
             
             # Handle Markdown parsing errors
             if 'parse' in error_str or 'entity' in error_str:
                 # Try with escaped text
                 try:
-                    escaped_text = escape_markdown(text)
+                    escaped_text = tg_escape_markdown(text, version=2)
                     await query.edit_message_text(escaped_text, parse_mode=parse_mode, **kwargs)
                     if message_id:
-                        _message_content_cache[message_id] = text
+                        with _message_edit_lock:
+                            _message_edit_cache[message_id] = text
+                            _message_edit_times[message_id] = time.time()
+                            _message_edit_failures[message_id] = 0
                     return
                 except Exception:
-                    # If escaping also fails, send as plain text
+                    # If escaping also fails, try plain text
                     try:
-                        await query.edit_message_text(text, parse_mode=None, **kwargs)
+                        await query.edit_message_text(text[:4000], parse_mode=None, **kwargs)
                         if message_id:
-                            _message_content_cache[message_id] = text
+                            with _message_edit_lock:
+                                _message_edit_cache[message_id] = text
+                                _message_edit_times[message_id] = time.time()
+                                _message_edit_failures[message_id] = 0
                         return
                     except Exception:
                         pass
             
-            # Exponential backoff for retries
+            # Increment failure count
+            if message_id:
+                with _message_edit_lock:
+                    _message_edit_failures[message_id] = _message_edit_failures.get(message_id, 0) + 1
+            
+            # Exponential backoff for retries (but shorter delays)
             if attempt < max_retries - 1:
-                wait_time = (2 ** attempt) * 0.1  # 0.1s, 0.2s, 0.4s
+                wait_time = (2 ** attempt) * 0.2  # 0.2s, 0.4s
                 await asyncio.sleep(wait_time)
             else:
                 # Last attempt failed - send new message instead of editing
                 try:
                     if hasattr(query, 'message') and query.message:
-                        await query.message.reply_text(text, parse_mode=parse_mode, **kwargs)
+                        await query.message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
                     elif hasattr(query, 'effective_message') and query.effective_message:
-                        await query.effective_message.reply_text(text, parse_mode=parse_mode, **kwargs)
+                        await query.effective_message.reply_text(text[:4000], parse_mode=parse_mode, **kwargs)
+                    if message_id:
+                        with _message_edit_lock:
+                            _message_edit_failures[message_id] = 0  # Reset on successful send
+                except Exception:
+                    pass
                 except Exception as send_error:
                     logger.warning(f"Failed to send message after edit failure: {send_error}")
         except Exception as e:
