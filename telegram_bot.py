@@ -5302,6 +5302,7 @@ def main():
     application.add_handler(CommandHandler("use_template", use_template_command))
     application.add_handler(CommandHandler("list_templates", list_templates_command))
     application.add_handler(CommandHandler("delete_template", delete_template_command))
+    application.add_handler(CommandHandler("download_template", download_template_command))
     
     # Image generation commands
     application.add_handler(CommandHandler("generate_image", generate_image_command))
