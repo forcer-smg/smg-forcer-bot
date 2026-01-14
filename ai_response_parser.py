@@ -67,18 +67,18 @@ class AIResponseParser:
             # If block has heredoc, treat as single shell command (don't parse Python inside)
             if block.get('has_heredoc', False):
                 # Extract the shell command line (before << EOF)
-                heredoc_match = re.search(r'^(.*?)\s*<<\s*[\'"]?EOF', block['content'], re.DOTALL | re.IGNORECASE)
+                heredoc_match = re.search(r'^(.*?)\s*<<\s*[\'"]?EOF', block_content, re.DOTALL | re.IGNORECASE)
                 if heredoc_match:
                     shell_command = heredoc_match.group(1).strip()
                     # Get everything from start to EOF (including heredoc content)
-                    full_heredoc_match = re.search(r'(.*?<<\s*[\'"]?EOF.*?EOF)', block['content'], re.DOTALL | re.IGNORECASE)
+                    full_heredoc_match = re.search(r'(.*?<<\s*[\'"]?EOF.*?EOF)', block_content, re.DOTALL | re.IGNORECASE)
                     if full_heredoc_match:
                         # Treat entire heredoc as single command
                         parsed['commands'].append(full_heredoc_match.group(1).strip())
                     else:
-                        parsed['commands'].append(block['content'])
-                    else:
                         parsed['commands'].append(block_content)
+                else:
+                    parsed['commands'].append(block_content)
             else:
                 commands = self.extract_commands(block_content, block_language)
                 parsed['commands'].extend(commands)
