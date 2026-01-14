@@ -8,6 +8,7 @@ import os
 import io
 import base64
 import logging
+import time
 from typing import Dict, Optional, Union, List
 from pathlib import Path
 import requests
@@ -25,11 +26,21 @@ except ImportError:
 class VisionProcessor:
     """Processes images using multiple vision model providers"""
     
-    def __init__(self, huggingface_key: Optional[str] = None, openrouter_key: Optional[str] = None):
+    def __init__(self, huggingface_key: Optional[str] = None, openrouter_key: Optional[str] = None,
+                 google_api_key: Optional[str] = None, replicate_api_key: Optional[str] = None,
+                 ocr_space_key: Optional[str] = None, pixlab_key: Optional[str] = None):
         self.huggingface_key = huggingface_key or os.getenv('HUGGINGFACE_API_KEY')
         self.openrouter_key = openrouter_key or os.getenv('OPENROUTER_API_KEY')
+        self.google_api_key = google_api_key or os.getenv('GOOGLE_API_KEY') or os.getenv('GOOGLE_GEMINI_API_KEY')
+        self.replicate_api_key = replicate_api_key or os.getenv('REPLICATE_API_KEY')
+        self.ocr_space_key = ocr_space_key or os.getenv('OCR_SPACE_API_KEY')  # Optional, has free tier without key
+        self.pixlab_key = pixlab_key or os.getenv('PIXLAB_API_KEY')  # Optional, has free tier without key
+        
         self.hf_available = bool(self.huggingface_key)
         self.or_available = bool(self.openrouter_key)
+        self.google_available = bool(self.google_api_key)
+        self.replicate_available = bool(self.replicate_api_key)
+        # OCR.space and PixLab work without keys (free tier)
         
         # Hugging Face models
         self.hf_models = {
@@ -190,36 +201,319 @@ class VisionProcessor:
             'error': 'All vision models failed'
         }
     
+    def process_image_google_gemini(self, image_data: Union[bytes, str, Path], 
+                                     prompt: str = "What is in this image?") -> Dict:
+        """
+        Process image using Google Gemini API (FREE tier available)
+        """
+        if not self.google_available:
+            raise ValueError("Google API key not configured")
+        
+        # Prepare image
+        image_bytes = self._prepare_image(image_data)
+        if not image_bytes:
+            raise ValueError("Failed to prepare image data")
+        
+        # Convert to base64
+        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # Google Gemini API endpoint
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-vision:generateContent?key={self.google_api_key}"
+        
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": image_base64
+                        }
+                    }
+                ]
+            }]
+        }
+        
+        try:
+            response = requests.post(api_url, json=payload, timeout=60)
+            response.raise_for_status()
+            
+            result = response.json()
+            content = result['candidates'][0]['content']['parts'][0]['text']
+            
+            return {
+                'success': True,
+                'provider': 'google_gemini',
+                'result': content,
+                'raw': result
+            }
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Google Gemini API error: {e}")
+            return {
+                'success': False,
+                'provider': 'google_gemini',
+                'error': str(e)
+            }
+    
+    def process_image_replicate(self, image_data: Union[bytes, str, Path], 
+                                prompt: str = "What is in this image?") -> Dict:
+        """
+        Process image using Replicate API (FREE tier available)
+        Uses BLIP-2 model for image captioning
+        """
+        if not self.replicate_available:
+            raise ValueError("Replicate API key not configured")
+        
+        # Prepare image
+        image_bytes = self._prepare_image(image_data)
+        if not image_bytes:
+            raise ValueError("Failed to prepare image data")
+        
+        # Convert to base64 data URL
+        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        image_data_url = f"data:image/jpeg;base64,{image_base64}"
+        
+        # Replicate API endpoint
+        api_url = "https://api.replicate.com/v1/predictions"
+        
+        headers = {
+            "Authorization": f"Token {self.replicate_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "version": "4b32258c42e9efd4288bb0840eaab4896285b5c29ee3e2057cc443d2fe2c8131",  # BLIP-2 model
+            "input": {
+                "image": image_data_url,
+                "task": "image_captioning",
+                "prompt": prompt
+            }
+        }
+        
+        try:
+            # Create prediction
+            response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+            response.raise_for_status()
+            
+            prediction = response.json()
+            prediction_id = prediction['id']
+            
+            # Poll for result
+            result_url = f"https://api.replicate.com/v1/predictions/{prediction_id}"
+            for _ in range(30):  # Max 30 seconds
+                time.sleep(1)
+                result_response = requests.get(result_url, headers=headers, timeout=10)
+                result_response.raise_for_status()
+                result_data = result_response.json()
+                
+                if result_data['status'] == 'succeeded':
+                    caption = result_data['output']
+                    return {
+                        'success': True,
+                        'provider': 'replicate',
+                        'result': caption,
+                        'raw': result_data
+                    }
+                elif result_data['status'] == 'failed':
+                    raise Exception(f"Replicate prediction failed: {result_data.get('error', 'Unknown error')}")
+            
+            raise Exception("Replicate prediction timed out")
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Replicate API error: {e}")
+            return {
+                'success': False,
+                'provider': 'replicate',
+                'error': str(e)
+            }
+    
+    def process_image_ocr_space(self, image_data: Union[bytes, str, Path]) -> Dict:
+        """
+        Extract text from image using OCR.space API (FREE tier, no key required)
+        """
+        # Prepare image
+        image_bytes = self._prepare_image(image_data)
+        if not image_bytes:
+            raise ValueError("Failed to prepare image data")
+        
+        # OCR.space API endpoint
+        api_url = "https://api.ocr.space/parse/image"
+        
+        files = {
+            'file': ('image.jpg', image_bytes, 'image/jpeg')
+        }
+        
+        data = {
+            'apikey': self.ocr_space_key or 'helloworld',  # Free tier key
+            'language': 'eng',
+            'isOverlayRequired': False
+        }
+        
+        try:
+            response = requests.post(api_url, files=files, data=data, timeout=30)
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            if result.get('ParsedResults') and len(result['ParsedResults']) > 0:
+                extracted_text = result['ParsedResults'][0].get('ParsedText', '')
+                return {
+                    'success': True,
+                    'provider': 'ocr_space',
+                    'result': extracted_text,
+                    'raw': result
+                }
+            else:
+                return {
+                    'success': False,
+                    'provider': 'ocr_space',
+                    'error': 'No text extracted'
+                }
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"OCR.space API error: {e}")
+            return {
+                'success': False,
+                'provider': 'ocr_space',
+                'error': str(e)
+            }
+    
+    def process_image_pixlab(self, image_data: Union[bytes, str, Path], 
+                            task: str = 'docscan') -> Dict:
+        """
+        Process image using PixLab API (FREE tier available)
+        Great for ID/document scanning
+        task: 'docscan' (ID scanning), 'ocr', 'face_detect'
+        """
+        # Prepare image
+        image_bytes = self._prepare_image(image_data)
+        if not image_bytes:
+            raise ValueError("Failed to prepare image data")
+        
+        # Convert to base64
+        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # PixLab API endpoint
+        if task == 'docscan':
+            api_url = "https://api.pixlab.io/docscan"
+        elif task == 'ocr':
+            api_url = "https://api.pixlab.io/ocr"
+        elif task == 'face_detect':
+            api_url = "https://api.pixlab.io/facedetect"
+        else:
+            api_url = "https://api.pixlab.io/docscan"
+        
+        params = {
+            'key': self.pixlab_key or 'free',  # Free tier
+            'img': image_base64
+        }
+        
+        try:
+            response = requests.post(api_url, json=params, timeout=30)
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            if result.get('status') == 200:
+                return {
+                    'success': True,
+                    'provider': 'pixlab',
+                    'task': task,
+                    'result': result.get('fields', result.get('text', result.get('faces', result))),
+                    'raw': result
+                }
+            else:
+                return {
+                    'success': False,
+                    'provider': 'pixlab',
+                    'error': result.get('error', 'Unknown error')
+                }
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"PixLab API error: {e}")
+            return {
+                'success': False,
+                'provider': 'pixlab',
+                'error': str(e)
+            }
+    
     def process_image(self, image_data: Union[bytes, str, Path], 
                      task: str = 'caption',
                      prompt: Optional[str] = None,
-                     prefer_provider: str = 'openrouter') -> Dict:
+                     prefer_provider: str = 'auto') -> Dict:
         """
         Process image using best available provider
-        prefer_provider: 'openrouter' or 'huggingface'
+        prefer_provider: 'auto', 'openrouter', 'google', 'replicate', 'huggingface', 'ocr', 'pixlab'
         """
-        # Try preferred provider first
-        if prefer_provider == 'openrouter' and self.or_available:
+        # Auto-select best provider based on availability
+        if prefer_provider == 'auto':
+            # Try free providers first
+            if self.google_available:
+                try:
+                    result = self.process_image_google_gemini(
+                        image_data, 
+                        prompt or "Describe this image in detail."
+                    )
+                    if result.get('success'):
+                        return result
+                except Exception as e:
+                    logger.warning(f"Google Gemini failed: {e}")
+            
+            if self.replicate_available:
+                try:
+                    result = self.process_image_replicate(
+                        image_data, 
+                        prompt or "What is in this image?"
+                    )
+                    if result.get('success'):
+                        return result
+                except Exception as e:
+                    logger.warning(f"Replicate failed: {e}")
+            
+            # Try OpenRouter
+            if self.or_available:
+                try:
+                    result = self.process_image_openrouter(
+                        image_data, 
+                        prompt or "Describe this image in detail."
+                    )
+                    if result.get('success'):
+                        return result
+                except Exception as e:
+                    logger.warning(f"OpenRouter failed: {e}")
+            
+            # Fallback to Hugging Face
+            if self.hf_available:
+                try:
+                    result = self.process_image_huggingface(image_data, task)
+                    if result.get('success'):
+                        return result
+                except Exception as e:
+                    logger.warning(f"Hugging Face failed: {e}")
+            
+            # Try OCR.space (no key required)
             try:
-                result = self.process_image_openrouter(
-                    image_data, 
-                    prompt or "Describe this image in detail."
-                )
+                result = self.process_image_ocr_space(image_data)
                 if result.get('success'):
                     return result
             except Exception as e:
-                logger.warning(f"OpenRouter failed: {e}")
+                logger.warning(f"OCR.space failed: {e}")
+        else:
+            # Use specified provider
+            if prefer_provider == 'google' and self.google_available:
+                return self.process_image_google_gemini(image_data, prompt or "Describe this image in detail.")
+            elif prefer_provider == 'replicate' and self.replicate_available:
+                return self.process_image_replicate(image_data, prompt or "What is in this image?")
+            elif prefer_provider == 'openrouter' and self.or_available:
+                return self.process_image_openrouter(image_data, prompt or "Describe this image in detail.")
+            elif prefer_provider == 'huggingface' and self.hf_available:
+                return self.process_image_huggingface(image_data, task)
+            elif prefer_provider == 'ocr':
+                return self.process_image_ocr_space(image_data)
+            elif prefer_provider == 'pixlab':
+                return self.process_image_pixlab(image_data, task)
         
-        # Fallback to Hugging Face
-        if self.hf_available:
-            try:
-                result = self.process_image_huggingface(image_data, task)
-                if result.get('success'):
-                    return result
-            except Exception as e:
-                logger.warning(f"Hugging Face failed: {e}")
-        
-        # Both failed
+        # All failed
         return {
             'success': False,
             'error': 'No vision models available or all failed'
@@ -303,9 +597,18 @@ class VisionProcessor:
 # Global processor instance
 _processor_instance = None
 
-def get_vision_processor(hf_key: Optional[str] = None, or_key: Optional[str] = None) -> VisionProcessor:
+def get_vision_processor(hf_key: Optional[str] = None, or_key: Optional[str] = None,
+                        google_key: Optional[str] = None, replicate_key: Optional[str] = None,
+                        ocr_key: Optional[str] = None, pixlab_key: Optional[str] = None) -> VisionProcessor:
     """Get or create global vision processor instance"""
     global _processor_instance
     if _processor_instance is None:
-        _processor_instance = VisionProcessor(hf_key, or_key)
+        _processor_instance = VisionProcessor(
+            huggingface_key=hf_key,
+            openrouter_key=or_key,
+            google_api_key=google_key,
+            replicate_api_key=replicate_key,
+            ocr_space_key=ocr_key,
+            pixlab_key=pixlab_key
+        )
     return _processor_instance
