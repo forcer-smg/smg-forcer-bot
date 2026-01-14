@@ -54,8 +54,24 @@ class AIResponseParser:
         
         # Extract commands from code blocks
         for block in code_blocks:
-            commands = self.extract_commands(block['content'], block['language'])
-            parsed['commands'].extend(commands)
+            # If block has heredoc, treat as single shell command (don't parse Python inside)
+            if block.get('has_heredoc', False):
+                # Extract the shell command line (before << EOF)
+                heredoc_match = re.search(r'^(.*?)\s*<<\s*[\'"]?EOF', block['content'], re.DOTALL | re.IGNORECASE)
+                if heredoc_match:
+                    shell_command = heredoc_match.group(1).strip()
+                    # Get everything from start to EOF (including heredoc content)
+                    full_heredoc_match = re.search(r'(.*?<<\s*[\'"]?EOF.*?EOF)', block['content'], re.DOTALL | re.IGNORECASE)
+                    if full_heredoc_match:
+                        # Treat entire heredoc as single command
+                        parsed['commands'].append(full_heredoc_match.group(1).strip())
+                    else:
+                        parsed['commands'].append(block['content'])
+                else:
+                    parsed['commands'].append(block['content'])
+            else:
+                commands = self.extract_commands(block['content'], block['language'])
+                parsed['commands'].extend(commands)
         
         # Extract thinking/explanation (text outside code blocks)
         parsed['thinking'] = self._extract_thinking_text(response_text, code_blocks)
@@ -82,11 +98,19 @@ class AIResponseParser:
             language = match.group(1) or 'bash'
             content = match.group(2).strip()
             
+            # Check if content contains heredoc (cat > file << 'EOF' or similar)
+            # If so, treat entire block as shell command, don't extract Python from inside
+            has_heredoc = bool(re.search(r'<<\s*[\'"]?EOF[\'"]?', content, re.IGNORECASE))
+            if has_heredoc:
+                # Force language to bash/shell for heredoc blocks
+                language = 'bash'
+            
             code_blocks.append({
                 'language': language.lower(),
                 'content': content,
                 'start_pos': match.start(),
-                'end_pos': match.end()
+                'end_pos': match.end(),
+                'has_heredoc': has_heredoc
             })
         
         return code_blocks
