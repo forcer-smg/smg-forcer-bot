@@ -143,14 +143,18 @@ class AIResponseParser:
                             os.chmod(temp_file, 0o755)
                     
                     # Execute the temp file (use absolute path for Linux)
-                    commands.append(f"python3 {temp_file}")
+                    command = f"python3 {temp_file}"
+                    commands.append(command)
+                    logger.info(f"Created Python temp script: {temp_file} -> {command}")
                     # Store temp file path for cleanup (will be handled by command executor)
                 except Exception as e:
-                    logger.warning(f"Error creating temp file for Python code: {e}")
-                    # Fallback: try python -c with proper escaping
-                    escaped = code_content.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
-                    # Use triple quotes for multi-line
-                    commands.append(f'python3 -c """{escaped}"""')
+                    logger.error(f"Error creating temp file for Python code: {e}", exc_info=True)
+                    # Fallback: try python -c with proper escaping (single line only)
+                    if code_content.strip():
+                        logger.warning("Falling back to python -c (may fail for multi-line code)")
+                        # Escape properly for shell
+                        escaped = code_content.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`').replace('\n', '; ')
+                        commands.append(f'python3 -c "{escaped}"')
         
         else:
             # For other languages, treat as single command
