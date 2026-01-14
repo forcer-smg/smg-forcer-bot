@@ -145,6 +145,12 @@ class AIResponseParser:
                 if not line or line.startswith('#'):
                     continue
                 
+                # FILTER: Skip markdown text, instructions, placeholders
+                # These are NOT executable commands
+                if self._is_non_executable_text(line):
+                    logger.debug(f"Skipping non-executable text: {line[:50]}...")
+                    continue
+                
                 # Handle multi-line commands (ending with \)
                 if line.endswith('\\'):
                     current_command.append(line.rstrip('\\').strip())
@@ -213,10 +219,103 @@ class AIResponseParser:
             if code_content.strip():
                 commands.append(code_content.strip())
         
-        # Filter out empty commands
-        commands = [cmd for cmd in commands if cmd.strip()]
+        # Filter out empty commands and non-executable text
+        filtered_commands = []
+        for cmd in commands:
+            cmd = cmd.strip()
+            if not cmd:
+                continue
+            # Additional validation: filter out instructions/placeholders
+            if self._is_non_executable_text(cmd):
+                logger.debug(f"Filtered out non-executable command: {cmd[:50]}...")
+                continue
+            filtered_commands.append(cmd)
         
-        return commands
+        return filtered_commands
+    
+    def _is_non_executable_text(self, text: str) -> bool:
+        """
+        Check if text is non-executable (instructions, placeholders, markdown, etc.)
+        
+        Args:
+            text: Text to check
+        
+        Returns:
+            True if text should NOT be executed as a command
+        """
+        text_lower = text.lower().strip()
+        
+        # Skip empty text
+        if not text_lower:
+            return True
+        
+        # Skip markdown headers, lists, etc.
+        if text_lower.startswith(('#', '*', '-', '1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.', '9.')):
+            # But allow shell commands that start with # (comments are already filtered)
+            if not text_lower.startswith('#'):
+                return True
+        
+        # Skip instructions/placeholders (common patterns)
+        instruction_patterns = [
+            r'^full name:\s*\[.*?\]',
+            r'^date of birth:\s*\[.*?\]',
+            r'^address:\s*\[.*?\]',
+            r'^license number:\s*\[.*?\]',
+            r'^issue date:\s*\[.*?\]',
+            r'^expiration date:\s*\[.*?\]',
+            r'^height:\s*\[.*?\]',
+            r'^weight:\s*\[.*?\]',
+            r'^eye color:\s*\[.*?\]',
+            r'^sex:\s*\[.*?\]',
+            r'^name:\s*\[.*?\]',
+            r'^dob:\s*\[.*?\]',
+            r'^.*:\s*\[.*?\]',  # Any "Label: [placeholder]" pattern
+            r'^step \d+:',  # "Step 1:", "Step 2:", etc.
+            r'^###',  # Markdown headers
+            r'^##',  # Markdown headers
+            r'^---',  # Markdown separators
+            r'^\*\*',  # Markdown bold
+            r'^✅',  # Checkmarks
+            r'^⏳',  # Hourglass
+            r'^❌',  # X mark
+        ]
+        
+        for pattern in instruction_patterns:
+            if re.match(pattern, text_lower):
+                return True
+        
+        # Skip text that looks like instructions (contains common instruction words but no executable command)
+        instruction_keywords = ['full name', 'date of birth', 'address', 'license number', 'issue date', 
+                               'expiration date', 'height', 'weight', 'eye color', 'sex', 'your name', 
+                               'your address', 'your dob', 'send your', 'provide your', 'enter your']
+        
+        # Check if text contains instruction keywords but no actual command
+        has_instruction_keyword = any(keyword in text_lower for keyword in instruction_keywords)
+        has_executable = any(keyword in text_lower for keyword in ['cd ', 'python', 'bash', 'sh ', 'find ', 
+                                                                    'grep ', 'ls ', 'cat ', 'echo ', 'wget ', 
+                                                                    'curl ', 'mkdir ', 'touch ', 'rm ', 'mv ', 
+                                                                    'cp ', 'chmod ', 'export ', 'import ', 'from ',
+                                                                    'def ', 'class ', 'if ', 'for ', 'while '])
+        
+        if has_instruction_keyword and not has_executable:
+            return True
+        
+        # Skip text that's just a label/header (no actual command)
+        if ':' in text and not any(char in text for char in ['/', '\\', '$', '`', '(', ')', '[', ']', '{', '}']):
+            # Might be a label, but check if it's actually a command
+            parts = text.split(':')
+            if len(parts) == 2:
+                label = parts[0].strip().lower()
+                value = parts[1].strip()
+                # If value is just a placeholder like [Your Name], it's not a command
+                if value.startswith('[') and value.endswith(']'):
+                    return True
+                # If label looks like an instruction field
+                if label in ['full name', 'date of birth', 'address', 'license number', 'issue date', 
+                            'expiration date', 'height', 'weight', 'eye color', 'sex', 'name', 'dob']:
+                    return True
+        
+        return False
     
     def detect_task_completion(self, response_text: str) -> bool:
         """
