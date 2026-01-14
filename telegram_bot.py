@@ -3383,9 +3383,14 @@ async def generate_word_command(update: Update, context: ContextTypes.DEFAULT_TY
         doc_gen = get_document_generator()
         filepath = doc_gen.generate_word(user_message, title="Generated Document")
         
-        if filepath:
+        if filepath and Path(filepath).exists():
+            file_size = Path(filepath).stat().st_size
+            if file_size == 0:
+                await update.message.reply_text("❌ Generated Word document is empty. Please try again.")
+                return
             with open(filepath, 'rb') as f:
                 await update.message.reply_document(document=f, filename=Path(filepath).name)
+            logger.info(f"Sent generated Word document: {filepath} (size: {file_size} bytes)")
         else:
             await update.message.reply_text("❌ Failed to generate Word document")
     except Exception as e:
