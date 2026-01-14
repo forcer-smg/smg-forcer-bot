@@ -16,7 +16,7 @@ from dotenv import load_dotenv, set_key
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.helpers import escape_markdown as tg_escape_markdown
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter, TimedOut
 
 # Import modules
 from HacxGPT import Config, HacxBrain
@@ -438,6 +438,20 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
             _edit_in_progress[message_id] = False
             return
             
+        except RetryAfter as e:
+            # Telegram's RetryAfter exception - has retry_after attribute
+            retry_after = e.retry_after
+            logger.warning(f"Rate limit hit on edit_message_text for {message_id} - Retry-After: {retry_after}s")
+            
+            # Handle rate limit with Retry-After (per-chat) - with jitter
+            if rate_limiter and chat_id:
+                rate_limiter.handle_rate_limit(retry_after=retry_after, chat_id=chat_id)
+            
+            # Mark as failed and stop trying
+            _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
+            _edit_in_progress[message_id] = False
+            return  # DO NOT RETRY - chat is paused via rate limiter
+            
         except BadRequest as e:
             error_str = str(e).lower()
             
@@ -449,18 +463,14 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
                 _edit_in_progress[message_id] = False
                 return  # DO NOT RETRY, DO NOT SEND NEW MESSAGE
             
-            # Handle 429 rate limit errors - Extract Retry-After from HTTP response
+            # Handle 429 rate limit errors (fallback if RetryAfter exception not caught)
             if '429' in error_str or 'too many requests' in error_str or 'rate limit' in error_str:
-                logger.warning(f"Rate limit hit on edit_message_text for {message_id}")
+                logger.warning(f"Rate limit hit on edit_message_text for {message_id} (BadRequest)")
                 
-                # Try to extract Retry-After from error object
+                # Try to extract Retry-After from error message
                 retry_after = None
                 try:
-                    # Check if error has retry_after attribute (from httpx response)
-                    if hasattr(e, 'retry_after'):
-                        retry_after = e.retry_after
-                    # Check if error message contains retry_after
-                    elif 'retry_after' in error_str:
+                    if 'retry_after' in error_str:
                         import re
                         match = re.search(r'retry_after[:\s]+(\d+)', error_str)
                         if match:
@@ -479,6 +489,15 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
             
             # Handle other BadRequest errors
             logger.warning(f"BadRequest error editing message {message_id}: {e}")
+            _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
+            _edit_in_progress[message_id] = False
+            return  # DO NOT RETRY
+            
+        except TimedOut as e:
+            # Handle timeout errors
+            logger.warning(f"Timeout on edit_message_text for {message_id}: {e}")
+            if rate_limiter and chat_id:
+                rate_limiter.handle_timeout(e, chat_id=chat_id)
             _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
             _edit_in_progress[message_id] = False
             return  # DO NOT RETRY
