@@ -4667,17 +4667,13 @@ async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
         # Read full file content if it's a text-based file and within size limit
         file_content = None
         if file_type == 'pdf':
-            # For PDFs, we can't read text directly - would need PyPDF2 or similar
-            # Just mark as PDF type
-            summary += "\n📄 PDF document detected"
+            # For PDFs, try to extract basic info from PDF if PyPDF2 is available
             try:
-                # Try to extract basic info from PDF if PyPDF2 is available
                 try:
                     import PyPDF2
                     with open(file_path, 'rb') as f:
                         pdf_reader = PyPDF2.PdfReader(f)
                         num_pages = len(pdf_reader.pages)
-                        summary += f"\nPages: {num_pages}"
                         # Try to extract first page text as preview
                         if num_pages > 0:
                             try:
@@ -4685,11 +4681,10 @@ async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
                                 preview_text = first_page.extract_text()[:500]
                                 if preview_text:
                                     file_content = preview_text
-                                    summary += f"\nPreview (first page): {preview_text[:200]}..."
                             except:
                                 pass
                 except ImportError:
-                    summary += "\n⚠️ PyPDF2 not available - install with: pip install PyPDF2"
+                    pass  # PyPDF2 not available - that's okay
             except Exception as e:
                 logger.debug(f"Could not read PDF: {e}")
         elif file_size <= MAX_FILE_SIZE and file_type in ['code', 'python', 'javascript', 'shell', 'text', 'config']:
@@ -4733,6 +4728,9 @@ async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
                 functions = len(re.findall(r'(?:function|def|fn|func)\s+\w+', file_content, re.MULTILINE | re.IGNORECASE))
                 classes = len(re.findall(r'class\s+\w+', file_content, re.MULTILINE | re.IGNORECASE))
                 summary += f"\nFunctions: {functions}\nClasses: {classes}"
+        else:
+            if file_type == 'pdf':
+                summary += "\n📄 PDF document (binary format)"
         else:
             if file_type == 'pdf':
                 summary += "\n📄 PDF document (binary format)"
