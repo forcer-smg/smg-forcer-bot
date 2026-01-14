@@ -4730,9 +4730,6 @@ async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
         else:
             if file_type == 'pdf':
                 summary += "\n📄 PDF document (binary format)"
-        else:
-            if file_type == 'pdf':
-                summary += "\n📄 PDF document (binary format)"
             else:
                 summary += "\n⚠️ File too large or binary - content not read"
         
