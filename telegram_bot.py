@@ -3730,6 +3730,587 @@ async def edit_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ==================== Face Swap Commands ====================
 
+# Service Management Commands
+async def start_service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start_service command"""
+    user_id = update.effective_user.id
+    
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /start_service [name] [command]\n\n"
+            "Example: /start_service evilginx './evilginx -p phishlets/'"
+        )
+        return
+    
+    service_name = context.args[0]
+    command = ' '.join(context.args[1:])
+    
+    try:
+        from service_manager import get_service_manager
+        from user_workspace_manager import UserWorkspaceManager
+        
+        workspace_manager = UserWorkspaceManager.get_instance()
+        user_workspace = workspace_manager.get_user_workspace(user_id)
+        
+        service_mgr = get_service_manager(str(user_workspace))
+        service_info = service_mgr.start_service(service_name, command, str(user_workspace), user_id)
+        
+        # Save to database
+        db.save_service(
+            user_id=user_id,
+            service_name=service_name,
+            command=command,
+            workspace_path=str(user_workspace),
+            pid=service_info.get('pid'),
+            status=service_info.get('status', 'running'),
+            metadata=service_info.get('metadata', {})
+        )
+        
+        if service_info.get('status') == 'running':
+            await update.message.reply_text(
+                f"✅ Service `{service_name}` started successfully\n\n"
+                f"PID: `{service_info.get('pid')}`\n"
+                f"Status: `{service_info.get('status')}`\n"
+                f"Logs: `{service_info.get('log_file', 'N/A')}`",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Failed to start service `{service_name}`\n\n"
+                f"Error: {service_info.get('message', 'Unknown error')}",
+                parse_mode='Markdown'
+            )
+    except Exception as e:
+        logger.error(f"Error in start_service_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def stop_service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /stop_service command"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /stop_service [name]")
+        return
+    
+    service_name = context.args[0]
+    
+    try:
+        from service_manager import get_service_manager
+        from user_workspace_manager import UserWorkspaceManager
+        
+        workspace_manager = UserWorkspaceManager.get_instance()
+        user_workspace = workspace_manager.get_user_workspace(user_id)
+        
+        service_mgr = get_service_manager(str(user_workspace))
+        service = db.get_service(user_id, service_name)
+        
+        if not service:
+            await update.message.reply_text(f"❌ Service `{service_name}` not found", parse_mode='Markdown')
+            return
+        
+        pid = service.get('pid')
+        success = service_mgr.stop_service(service_name, user_id, pid)
+        
+        if success:
+            db.update_service_status(user_id, service_name, 'stopped')
+            await update.message.reply_text(f"✅ Service `{service_name}` stopped", parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"❌ Failed to stop service `{service_name}`", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in stop_service_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def list_services_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /list_services command"""
+    user_id = update.effective_user.id
+    
+    try:
+        services = db.list_user_services(user_id)
+        
+        if not services:
+            await update.message.reply_text("No services found")
+            return
+        
+        message = "📋 *Your Services*\n\n"
+        for service in services:
+            status_emoji = "🟢" if service.get('status') == 'running' else "🔴"
+            message += f"{status_emoji} *{service.get('service_name')}*\n"
+            message += f"Status: `{service.get('status')}`\n"
+            if service.get('pid'):
+                message += f"PID: `{service.get('pid')}`\n"
+            message += f"Started: `{service.get('started_at', 'N/A')}`\n\n"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in list_services_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def service_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /service_status command"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /service_status [name]")
+        return
+    
+    service_name = context.args[0]
+    
+    try:
+        from service_manager import get_service_manager
+        from user_workspace_manager import UserWorkspaceManager
+        
+        workspace_manager = UserWorkspaceManager.get_instance()
+        user_workspace = workspace_manager.get_user_workspace(user_id)
+        
+        service_mgr = get_service_manager(str(user_workspace))
+        service = db.get_service(user_id, service_name)
+        
+        if not service:
+            await update.message.reply_text(f"❌ Service `{service_name}` not found", parse_mode='Markdown')
+            return
+        
+        pid = service.get('pid')
+        status = service_mgr.get_service_status(service_name, user_id, pid)
+        
+        message = f"📊 *Service Status: {service_name}*\n\n"
+        message += f"Status: `{status.get('status')}`\n"
+        message += f"Running: `{status.get('running')}`\n"
+        if status.get('pid'):
+            message += f"PID: `{status.get('pid')}`\n"
+            message += f"CPU: `{status.get('cpu_percent', 0):.1f}%`\n"
+            message += f"Memory: `{status.get('memory_mb', 0):.1f} MB`\n"
+            message += f"Uptime: `{status.get('uptime_seconds', 0)}s`\n"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in service_status_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def service_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /service_logs command"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /service_logs [name] [lines]")
+        return
+    
+    service_name = context.args[0]
+    lines = int(context.args[1]) if len(context.args) > 1 else 50
+    
+    try:
+        from service_manager import get_service_manager
+        from user_workspace_manager import UserWorkspaceManager
+        
+        workspace_manager = UserWorkspaceManager.get_instance()
+        user_workspace = workspace_manager.get_user_workspace(user_id)
+        
+        service_mgr = get_service_manager(str(user_workspace))
+        logs = service_mgr.get_service_logs(service_name, user_id, lines)
+        
+        if len(logs) > 4000:
+            logs = logs[-4000:] + "\n... (truncated)"
+        
+        await update.message.reply_text(f"📄 *Logs for {service_name}*\n\n```\n{logs}\n```", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in service_logs_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+# Project Management Commands
+async def save_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /save_project command"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /save_project [name]")
+        return
+    
+    project_name = context.args[0]
+    
+    try:
+        from project_persistence import get_project_persistence
+        from user_workspace_manager import UserWorkspaceManager
+        
+        workspace_manager = UserWorkspaceManager.get_instance()
+        user_workspace = workspace_manager.get_user_workspace(user_id)
+        
+        persistence = get_project_persistence(db)
+        success = persistence.save_project(user_id, project_name, str(user_workspace))
+        
+        if success:
+            await update.message.reply_text(f"✅ Project `{project_name}` saved successfully", parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"❌ Failed to save project `{project_name}`", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in save_project_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def restore_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /restore_project command"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /restore_project [name]")
+        return
+    
+    project_name = context.args[0]
+    
+    try:
+        from project_persistence import get_project_persistence
+        from user_workspace_manager import UserWorkspaceManager
+        
+        workspace_manager = UserWorkspaceManager.get_instance()
+        user_workspace = workspace_manager.get_user_workspace(user_id)
+        
+        persistence = get_project_persistence(db)
+        success = persistence.restore_project(user_id, project_name, str(user_workspace))
+        
+        if success:
+            await update.message.reply_text(f"✅ Project `{project_name}` restored successfully", parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"❌ Failed to restore project `{project_name}`", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in restore_project_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def list_projects_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /list_projects command"""
+    user_id = update.effective_user.id
+    
+    try:
+        from project_persistence import get_project_persistence
+        persistence = get_project_persistence(db)
+        projects = persistence.list_projects(user_id)
+        
+        if not projects:
+            await update.message.reply_text("No saved projects found")
+            return
+        
+        message = "📋 *Your Saved Projects*\n\n"
+        for project in projects:
+            metadata = project.get('metadata', {})
+            if isinstance(metadata, str):
+                import json
+                try:
+                    metadata = json.loads(metadata)
+                except:
+                    metadata = {}
+            
+            message += f"📁 *{project.get('project_name')}*\n"
+            message += f"Type: `{metadata.get('project_type', 'unknown')}`\n"
+            message += f"Files: `{metadata.get('file_count', 0)}`\n"
+            message += f"Saved: `{project.get('created_at', 'N/A')}`\n\n"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in list_projects_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def delete_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /delete_project command"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /delete_project [name]")
+        return
+    
+    project_name = context.args[0]
+    
+    try:
+        from project_persistence import get_project_persistence
+        persistence = get_project_persistence(db)
+        success = persistence.delete_project(user_id, project_name)
+        
+        if success:
+            await update.message.reply_text(f"✅ Project `{project_name}` deleted", parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"❌ Failed to delete project `{project_name}`", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in delete_project_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+# Admin Commands
+async def admin_workspaces_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /admin_workspaces command (admin only)"""
+    user_id = update.effective_user.id
+    
+    if not db.is_admin(user_id):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+    
+    try:
+        from admin_workspace_manager import get_admin_workspace_manager
+        admin_mgr = get_admin_workspace_manager(db)
+        workspaces = admin_mgr.list_all_workspaces()
+        
+        if not workspaces:
+            await update.message.reply_text("No workspaces found")
+            return
+        
+        message = "📋 *All User Workspaces*\n\n"
+        for ws in workspaces[:20]:  # Limit to 20 for message size
+            message += f"👤 User: `{ws.get('user_id')}` ({ws.get('username', 'N/A')})\n"
+            message += f"Projects: `{ws.get('project_count', 0)}` | Services: `{ws.get('service_count', 0)}`\n"
+            if ws.get('workspace_exists'):
+                size_mb = ws.get('workspace_size', 0) / 1024 / 1024
+                message += f"Size: `{size_mb:.1f} MB`\n"
+            message += "\n"
+        
+        if len(workspaces) > 20:
+            message += f"\n... and {len(workspaces) - 20} more"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in admin_workspaces_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def admin_workspace_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /admin_workspace command (admin only)"""
+    user_id = update.effective_user.id
+    
+    if not db.is_admin(user_id):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /admin_workspace [user_id]")
+        return
+    
+    try:
+        target_user_id = int(context.args[0])
+        from admin_workspace_manager import get_admin_workspace_manager
+        admin_mgr = get_admin_workspace_manager(db)
+        details = admin_mgr.get_workspace_details(target_user_id)
+        
+        message = f"📊 *Workspace Details for User {target_user_id}*\n\n"
+        message += f"Username: `{details.get('username', 'N/A')}`\n"
+        message += f"Workspace: `{details.get('workspace_path', 'N/A')}`\n"
+        message += f"Exists: `{details.get('exists', False)}`\n"
+        if details.get('exists'):
+            size_mb = details.get('size', 0) / 1024 / 1024
+            message += f"Size: `{size_mb:.1f} MB`\n"
+            message += f"Files: `{details.get('file_count', 0)}`\n"
+            message += f"Projects: `{len(details.get('projects', []))}`\n"
+        
+        message += f"\nActive Services: `{len(details.get('active_services', []))}`\n"
+        if details.get('hosting_detected'):
+            message += f"⚠️ *Hosting Detected*\n"
+            hosting_info = details.get('hosting_info', {})
+            message += f"Processes: `{len(hosting_info.get('running_processes', []))}`\n"
+            message += f"Open Ports: `{len(hosting_info.get('open_ports', []))}`\n"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
+    except Exception as e:
+        logger.error(f"Error in admin_workspace_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def admin_services_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /admin_services command (admin only)"""
+    user_id = update.effective_user.id
+    
+    if not db.is_admin(user_id):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+    
+    try:
+        all_services = db.get_all_services()
+        
+        if not all_services:
+            await update.message.reply_text("No services found")
+            return
+        
+        message = "📋 *All Active Services*\n\n"
+        for service in all_services[:20]:  # Limit to 20
+            status_emoji = "🟢" if service.get('status') == 'running' else "🔴"
+            message += f"{status_emoji} User: `{service.get('user_id')}` | Service: `{service.get('service_name')}`\n"
+            message += f"Status: `{service.get('status')}`\n"
+            if service.get('pid'):
+                message += f"PID: `{service.get('pid')}`\n"
+            message += "\n"
+        
+        if len(all_services) > 20:
+            message += f"\n... and {len(all_services) - 20} more"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in admin_services_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def admin_service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /admin_service command (admin only)"""
+    user_id = update.effective_user.id
+    
+    if not db.is_admin(user_id):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /admin_service [user_id]")
+        return
+    
+    try:
+        target_user_id = int(context.args[0])
+        services = db.list_user_services(target_user_id)
+        
+        if not services:
+            await update.message.reply_text(f"No services found for user {target_user_id}")
+            return
+        
+        message = f"📋 *Services for User {target_user_id}*\n\n"
+        for service in services:
+            status_emoji = "🟢" if service.get('status') == 'running' else "🔴"
+            message += f"{status_emoji} *{service.get('service_name')}*\n"
+            message += f"Status: `{service.get('status')}`\n"
+            if service.get('pid'):
+                message += f"PID: `{service.get('pid')}`\n"
+            message += f"Command: `{service.get('command', 'N/A')[:50]}...`\n\n"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
+    except Exception as e:
+        logger.error(f"Error in admin_service_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def admin_delete_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /admin_delete_project command (admin only)"""
+    user_id = update.effective_user.id
+    
+    if not db.is_admin(user_id):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+    
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("Usage: /admin_delete_project [user_id] [project_name]")
+        return
+    
+    try:
+        target_user_id = int(context.args[0])
+        project_name = context.args[1]
+        
+        from admin_workspace_manager import get_admin_workspace_manager
+        admin_mgr = get_admin_workspace_manager(db)
+        success = admin_mgr.delete_user_project(target_user_id, project_name)
+        
+        if success:
+            await update.message.reply_text(f"✅ Project `{project_name}` deleted for user {target_user_id}", parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"❌ Failed to delete project", parse_mode='Markdown')
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
+    except Exception as e:
+        logger.error(f"Error in admin_delete_project_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def admin_stop_service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /admin_stop_service command (admin only)"""
+    user_id = update.effective_user.id
+    
+    if not db.is_admin(user_id):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+    
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("Usage: /admin_stop_service [user_id] [service_name]")
+        return
+    
+    try:
+        target_user_id = int(context.args[0])
+        service_name = context.args[1]
+        
+        from admin_workspace_manager import get_admin_workspace_manager
+        admin_mgr = get_admin_workspace_manager(db)
+        success = admin_mgr.stop_user_service(target_user_id, service_name)
+        
+        if success:
+            await update.message.reply_text(f"✅ Service `{service_name}` stopped for user {target_user_id}", parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"❌ Failed to stop service", parse_mode='Markdown')
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
+    except Exception as e:
+        logger.error(f"Error in admin_stop_service_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def admin_delete_service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /admin_delete_service command (admin only)"""
+    user_id = update.effective_user.id
+    
+    if not db.is_admin(user_id):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+    
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("Usage: /admin_delete_service [user_id] [service_name]")
+        return
+    
+    try:
+        target_user_id = int(context.args[0])
+        service_name = context.args[1]
+        
+        from admin_workspace_manager import get_admin_workspace_manager
+        admin_mgr = get_admin_workspace_manager(db)
+        success = admin_mgr.delete_user_service(target_user_id, service_name)
+        
+        if success:
+            await update.message.reply_text(f"✅ Service `{service_name}` deleted for user {target_user_id}", parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"❌ Failed to delete service", parse_mode='Markdown')
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID")
+    except Exception as e:
+        logger.error(f"Error in admin_delete_service_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
+async def admin_workspace_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /admin_workspace_stats command (admin only)"""
+    user_id = update.effective_user.id
+    
+    if not db.is_admin(user_id):
+        await update.message.reply_text("❌ Access denied. Admin only.")
+        return
+    
+    try:
+        from admin_workspace_manager import get_admin_workspace_manager
+        admin_mgr = get_admin_workspace_manager(db)
+        stats = admin_mgr.get_workspace_statistics()
+        
+        message = "📊 *Workspace Statistics*\n\n"
+        message += f"Total Workspaces: `{stats.get('total_workspaces', 0)}`\n"
+        total_size_gb = stats.get('total_size', 0) / 1024 / 1024 / 1024
+        message += f"Total Size: `{total_size_gb:.2f} GB`\n"
+        message += f"Active Services: `{stats.get('active_services_count', 0)}`\n"
+        message += f"Total Projects: `{stats.get('total_projects', 0)}`\n"
+        message += f"Users with Hosting: `{stats.get('users_with_hosting', 0)}`\n\n"
+        
+        if stats.get('projects_by_type'):
+            message += "*Projects by Type:*\n"
+            for ptype, count in stats['projects_by_type'].items():
+                message += f"`{ptype}`: {count}\n"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Error in admin_workspace_stats_command: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+
 async def face_swap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /face_swap command"""
     user_id = update.effective_user.id
@@ -5605,6 +6186,29 @@ def main():
     
     # Face swap commands
     application.add_handler(CommandHandler("face_swap", face_swap_command))
+    
+    # Service management commands
+    application.add_handler(CommandHandler("start_service", start_service_command))
+    application.add_handler(CommandHandler("stop_service", stop_service_command))
+    application.add_handler(CommandHandler("list_services", list_services_command))
+    application.add_handler(CommandHandler("service_status", service_status_command))
+    application.add_handler(CommandHandler("service_logs", service_logs_command))
+    
+    # Project management commands
+    application.add_handler(CommandHandler("save_project", save_project_command))
+    application.add_handler(CommandHandler("restore_project", restore_project_command))
+    application.add_handler(CommandHandler("list_projects", list_projects_command))
+    application.add_handler(CommandHandler("delete_project", delete_project_command))
+    
+    # Admin workspace/service management commands
+    application.add_handler(CommandHandler("admin_workspaces", admin_workspaces_command))
+    application.add_handler(CommandHandler("admin_workspace", admin_workspace_command))
+    application.add_handler(CommandHandler("admin_services", admin_services_command))
+    application.add_handler(CommandHandler("admin_service", admin_service_command))
+    application.add_handler(CommandHandler("admin_delete_project", admin_delete_project_command))
+    application.add_handler(CommandHandler("admin_stop_service", admin_stop_service_command))
+    application.add_handler(CommandHandler("admin_delete_service", admin_delete_service_command))
+    application.add_handler(CommandHandler("admin_workspace_stats", admin_workspace_stats_command))
     
     # Add approval callback handler
     application.add_handler(CallbackQueryHandler(handle_approval_callback, pattern=r'^(approve|reject):'))

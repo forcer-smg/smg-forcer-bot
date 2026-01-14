@@ -460,8 +460,46 @@ ls -la
 
 The system will execute it automatically and show formatted results.
 
+WORKSPACE INTELLIGENCE - Check Before Creating:
+Before creating ANY file or project, ALWAYS check if it already exists:
+
+1. Check for similar projects:
+```bash
+ls -la | grep -i "project_name"
+find . -type d -iname "*project_name*" 2>/dev/null
+```
+
+2. Check if file exists:
+```bash
+test -f "file_path" && cat "file_path" || echo "File not found"
+ls -la "file_path" 2>/dev/null || echo "File does not exist"
+```
+
+3. If similar project found:
+   - Read the existing project structure: ls -la project_name/
+   - Check main files: cat project_name/main.py (or main.go, etc.)
+   - Decide: Edit existing project OR create new one
+   - If editing: Read existing files first, then modify them
+   - If creating new: Use different name or location
+
+4. If file exists:
+   - Read existing content first: cat file_path
+   - Analyze what it does
+   - Decide: Edit existing file OR create new version
+   - If editing: Modify the existing file
+   - If creating new: Use different name (e.g., file_v2.py)
+
+5. Project type detection:
+   - Check for project indicators: ls -la | grep -E "(requirements.txt|go.mod|package.json|Cargo.toml)"
+   - Detect project type before creating files
+
 SCRIPT CREATION - Create Scripts On The Fly:
-When you need to create a script, use heredoc pattern:
+When you need to create a script, FIRST check if it exists:
+```bash
+test -f script.py && cat script.py || echo "File not found, creating new"
+```
+
+If file doesn't exist, use heredoc pattern:
 ```bash
 cat > script.py << 'EOF'
 #!/usr/bin/env python3

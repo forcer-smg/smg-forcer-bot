@@ -186,6 +186,40 @@ class Database:
                 )
             """)
             
+            # User services table (for long-running services)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_services (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    service_name TEXT NOT NULL,
+                    command TEXT NOT NULL,
+                    workspace_path TEXT,
+                    pid INTEGER,
+                    status TEXT DEFAULT 'running',
+                    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    stopped_at TIMESTAMP,
+                    metadata JSONB,
+                    UNIQUE(user_id, service_name),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            """)
+            
+            # User projects table (for project persistence)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_projects (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    project_name TEXT NOT NULL,
+                    workspace_path TEXT,
+                    project_data BYTEA,
+                    metadata JSONB,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, project_name),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            """)
+            
             # Document templates table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS document_templates (
@@ -212,6 +246,9 @@ class Database:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_document_templates_user_id ON document_templates(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_document_templates_type ON document_templates(type)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_document_templates_category ON document_templates(category)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_services_user_id ON user_services(user_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_services_status ON user_services(status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_projects_user_id ON user_projects(user_id)")
             
             conn.commit()
             logger.info("PostgreSQL database initialized successfully")
