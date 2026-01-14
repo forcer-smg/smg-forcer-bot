@@ -6044,25 +6044,75 @@ Continue with next steps. If task is complete, say "Task complete"."""
                     
                 except Exception as e:
                     logger.warning(f"Continuous execution not available, using standard execution: {e}")
-                    # Fallback to standard execution
-                    if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
-                        async def process_message():
-                            return await desktop_handler.handle_with_streaming(
-                                user_message,
-                                update,
-                                context
-                            )
+                    # Fallback to standard execution with command execution
+                    try:
+                        # Get AI response first
+                        ai_response = ""
+                        for chunk in brain.chat(user_message):
+                            ai_response += chunk
                         
-                        cleaned_response = await concurrency_manager.process_request(
-                            user_id,
-                            process_message
-                        )
-                    else:
-                        cleaned_response = await desktop_handler.handle_with_streaming(
-                            user_message,
-                            update,
-                            context
-                        )
+                        # Parse and execute commands automatically
+                        try:
+                            from command_executor import get_command_executor
+                            from ai_response_parser import get_ai_response_parser
+                            from auto_retry_manager import get_auto_retry_manager
+                            
+                            command_executor = get_command_executor(workspace)
+                            response_parser = get_ai_response_parser()
+                            retry_manager = get_auto_retry_manager()
+                            
+                            # Parse AI response
+                            parsed = response_parser.parse_ai_response(ai_response)
+                            
+                            # Execute commands if found
+                            if parsed['commands']:
+                                logger.info(f"Found {len(parsed['commands'])} commands, executing...")
+                                execution_results = []
+                                
+                                for i, command in enumerate(parsed['commands'], 1):
+                                    logger.info(f"Executing command {i}/{len(parsed['commands'])}: {command}")
+                                    
+                                    # Execute with retry
+                                    max_retries = 3
+                                    for attempt in range(max_retries):
+                                        result = command_executor.execute_command(
+                                            command,
+                                            cwd=workspace,
+                                            timeout=300,
+                                            verify=True
+                                        )
+                                        execution_results.append(result)
+                                        
+                                        if result.get('verified', False) and result.get('success', False):
+                                            logger.info(f"Command {i} executed successfully")
+                                            break
+                                        elif attempt < max_retries - 1:
+                                            error_msg = result.get('error', '') or result.get('stderr', '') or 'Verification failed'
+                                            alt_command = retry_manager.retry_with_alternative(command, error_msg, attempt + 1)
+                                            if alt_command and alt_command != command:
+                                                logger.info(f"Trying alternative: {alt_command}")
+                                                command = alt_command
+                                            await asyncio.sleep(1)
+                                
+                                # Format results and append to response
+                                if execution_results:
+                                    results_summary = "\n\n**Execution Results:**\n"
+                                    for r in execution_results:
+                                        results_summary += f"`{r['command']}` → Exit: {r.get('exit_code', 'N/A')}, Verified: {'Yes' if r.get('verified', False) else 'No'}\n"
+                                        if r.get('stdout'):
+                                            results_summary += f"Output: {r['stdout'][:200]}...\n"
+                                    ai_response += results_summary
+                        except Exception as cmd_err:
+                            logger.warning(f"Command execution failed: {cmd_err}", exc_info=True)
+                            # Continue with original response if command execution fails
+                        
+                        cleaned_response = ai_response
+                    except Exception as fallback_err:
+                        logger.error(f"Fallback execution failed: {fallback_err}", exc_info=True)
+                        # Last resort: just use brain directly
+                        cleaned_response = ""
+                        for chunk in brain.chat(user_message):
+                            cleaned_response += chunk
                 
                 # Update task results if available
                 if hasattr(desktop_handler, 'last_task_results'):
@@ -6364,6 +6414,89 @@ Continue with next steps. If task is complete, say "Task complete"."""
                 cleaned_response = full_response.replace("[SMG-Forcer]:", "").replace("[HacxGPT]:", "").strip()
                 if not cleaned_response:
                     cleaned_response = "No response generated."
+                
+                # Parse and execute commands automatically (Cursor-style)
+                try:
+                    from command_executor import get_command_executor
+                    from ai_response_parser import get_ai_response_parser
+                    from auto_retry_manager import get_auto_retry_manager
+                    
+                    # Get workspace
+                    try:
+                        from user_workspace_manager import UserWorkspaceManager
+                        workspace_manager = UserWorkspaceManager.get_instance()
+                        user_workspace = workspace_manager.get_user_workspace(user_id)
+                        workspace = str(user_workspace)
+                    except ImportError:
+                        base_workspace = os.getenv('WORKSPACE_ROOT', os.getcwd())
+                        workspace = os.path.join(base_workspace, f"user_{user_id}")
+                        os.makedirs(workspace, exist_ok=True)
+                    
+                    command_executor = get_command_executor(workspace)
+                    response_parser = get_ai_response_parser()
+                    retry_manager = get_auto_retry_manager()
+                    
+                    # Parse AI response for commands
+                    parsed = response_parser.parse_ai_response(cleaned_response)
+                    
+                    # Execute commands if found
+                    if parsed['commands']:
+                        logger.info(f"Found {len(parsed['commands'])} commands in response, executing...")
+                        execution_results = []
+                        
+                        for i, command in enumerate(parsed['commands'], 1):
+                            logger.info(f"Executing command {i}/{len(parsed['commands'])}: {command}")
+                            
+                            # Execute with retry
+                            max_retries = 3
+                            executed = False
+                            
+                            for attempt in range(max_retries):
+                                result = command_executor.execute_command(
+                                    command,
+                                    cwd=workspace,
+                                    timeout=300,
+                                    verify=True
+                                )
+                                execution_results.append(result)
+                                
+                                if result.get('verified', False) and result.get('success', False):
+                                    executed = True
+                                    logger.info(f"Command {i} executed and verified")
+                                    break
+                                elif attempt < max_retries - 1:
+                                    error_msg = result.get('error', '') or result.get('stderr', '') or 'Verification failed'
+                                    alt_command = retry_manager.retry_with_alternative(command, error_msg, attempt + 1)
+                                    if alt_command and alt_command != command:
+                                        logger.info(f"Trying alternative: {alt_command}")
+                                        command = alt_command
+                                    await asyncio.sleep(1)
+                            
+                            if not executed:
+                                logger.warning(f"Command {i} failed after {max_retries} attempts")
+                        
+                        # Append execution results to response
+                        if execution_results:
+                            results_summary = "\n\n**Execution Results:**\n"
+                            for r in execution_results:
+                                status = "✅" if r.get('verified', False) and r.get('success', False) else "❌"
+                                results_summary += f"{status} `{r['command'][:60]}...`\n"
+                                if r.get('stdout'):
+                                    results_summary += f"   Output: {r['stdout'][:150]}...\n"
+                                elif r.get('stderr'):
+                                    results_summary += f"   Error: {r['stderr'][:150]}...\n"
+                            cleaned_response += results_summary
+                            
+                            # Update sent message with results
+                            if sent_message:
+                                try:
+                                    final_text = cleaned_response[:4000] if len(cleaned_response) > 4000 else cleaned_response
+                                    await sent_message.edit_text(final_text, parse_mode='Markdown')
+                                except BadRequest:
+                                    pass
+                except Exception as cmd_err:
+                    logger.warning(f"Command execution failed: {cmd_err}", exc_info=True)
+                    # Continue with original response if command execution fails
                 
                 if sent_message:
                     try:
