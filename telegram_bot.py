@@ -6859,14 +6859,31 @@ If task is complete, say "Task complete". Otherwise, generate and execute the ne
                                     sent_message = await update.message.reply_text(display_text)
                             else:
                                 display_text = cleaned_chunk[:4000] if len(cleaned_chunk) > 4000 else cleaned_chunk
-                                try:
-                                    await sent_message.edit_text(display_text, parse_mode='Markdown')
-                                except BadRequest as e:
-                                    if 'not modified' not in str(e).lower():
-                                        if 'too long' in str(e).lower() and len(cleaned_chunk) > 4000:
-                                            remaining = cleaned_chunk[4000:]
-                                            if remaining:
-                                                sent_message = await update.message.reply_text(remaining[:4000], parse_mode='Markdown')
+                                # For streaming, send new messages instead of editing to avoid 400 errors
+                                # Only send new message if content has changed significantly (at least 100 chars difference)
+                                if sent_message:
+                                    try:
+                                        # Get last sent text length
+                                        last_text_length = len(_message_edit_cache.get(f"{update.effective_chat.id}_{sent_message.message_id}", ""))
+                                        current_text_length = len(display_text)
+                                        
+                                        # Only send new message if content changed significantly (100+ chars) or 5+ seconds passed
+                                        if (current_text_length - last_text_length > 100) or (time_since_last >= 5.0):
+                                            try:
+                                                sent_message = await update.message.reply_text(display_text, parse_mode='Markdown')
+                                                # Cache the message ID and text
+                                                if sent_message:
+                                                    msg_id = f"{update.effective_chat.id}_{sent_message.message_id}"
+                                                    _message_edit_cache[msg_id] = display_text
+                                            except BadRequest:
+                                                sent_message = await update.message.reply_text(display_text)
+                                    except Exception as e:
+                                        logger.debug(f"Error sending streaming update: {e}")
+                                        # Fallback: try to edit (but it will likely fail, that's okay)
+                                        try:
+                                            await sent_message.edit_text(display_text, parse_mode='Markdown')
+                                        except:
+                                            pass
                             
                             last_update_time = current_time
                             chunk_buffer = ""

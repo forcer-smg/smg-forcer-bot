@@ -98,6 +98,46 @@ class CommandExecutor:
             if validation_result and not validation_result.get('valid', True):
                 logger.warning(f"Command validation failed: {validation_result.get('errors', [])}")
                 # Still execute, but log validation issues
+    
+    def _validate_command(self, command: str, cwd: str = None) -> Dict[str, Any]:
+        """
+        Validate command before execution (basic checks)
+        
+        Args:
+            command: Command to validate
+            cwd: Working directory
+        
+        Returns:
+            Dictionary with 'valid' boolean and 'errors' list
+        """
+        result = {
+            'valid': True,
+            'errors': []
+        }
+        
+        # Basic validation: check if command is not empty
+        if not command or not command.strip():
+            result['valid'] = False
+            result['errors'].append('Command is empty')
+            return result
+        
+        # Check for obviously dangerous patterns (only in strict mode)
+        # In unrestricted mode (Linux), allow most commands
+        dangerous_patterns = [
+            'rm -rf /',  # System-wide deletion
+            'format c:',  # Windows format
+            'mkfs /dev/',  # Format disk
+        ]
+        
+        command_lower = command.lower()
+        for pattern in dangerous_patterns:
+            if pattern in command_lower:
+                result['valid'] = False
+                result['errors'].append(f'Dangerous pattern detected: {pattern}')
+                return result
+        
+        # Command is valid
+        return result
         result = {
             'command': command,
             'success': False,
