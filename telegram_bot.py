@@ -132,6 +132,27 @@ except ImportError:
 # Global application instance (set in main())
 bot_application = None
 
+# Helper function to get workspace root (Railway/Linux compatible)
+def get_workspace_root() -> str:
+    """
+    Get workspace root directory, defaulting to /app on Railway/Linux
+    
+    Returns:
+        Workspace root path (str)
+    """
+    import sys
+    # Check if WORKSPACE_ROOT is set
+    workspace_root = os.getenv('WORKSPACE_ROOT')
+    if workspace_root:
+        return workspace_root
+    
+    # On Railway/Linux, default to /app if it exists
+    if (sys.platform == 'linux' or sys.platform.startswith('linux')) and os.path.exists('/app'):
+        return '/app'
+    
+    # Fallback to current working directory
+    return os.getcwd()
+
 # Helper function to execute database queries (handles both SQLite and PostgreSQL)
 def execute_db_query(conn, query, params):
     """Execute a database query with proper syntax for SQLite or PostgreSQL"""
@@ -6069,10 +6090,17 @@ You've used all your available requests.
                 workspace = str(user_workspace)
             except ImportError:
                 # Fallback if UserWorkspaceManager not available
-                base_workspace = os.getenv('WORKSPACE_ROOT', os.getcwd())
+                # On Railway/Linux, default to /app if WORKSPACE_ROOT not set
+                import sys
+                if sys.platform == 'linux' or sys.platform.startswith('linux'):
+                    # Railway/Linux: use /app as base if WORKSPACE_ROOT not set
+                    default_base = '/app' if os.path.exists('/app') else os.getcwd()
+                else:
+                    default_base = os.getcwd()
+                base_workspace = os.getenv('WORKSPACE_ROOT', default_base)
                 workspace = os.path.join(base_workspace, f"user_{user_id}")
                 os.makedirs(workspace, exist_ok=True)
-                logger.warning("UserWorkspaceManager not available, using fallback workspace isolation")
+                logger.warning(f"UserWorkspaceManager not available, using fallback workspace isolation: {workspace}")
             
             if DESKTOP_HANDLER_AVAILABLE:
                 logger.info(f"Initializing DesktopAIHandler for user {user_id} with workspace: {workspace}")
@@ -6908,7 +6936,7 @@ If task is complete, say "Task complete". Otherwise, generate and execute the ne
                         user_workspace = workspace_manager.get_user_workspace(user_id)
                         workspace = str(user_workspace)
                     except ImportError:
-                        base_workspace = os.getenv('WORKSPACE_ROOT', os.getcwd())
+                        base_workspace = get_workspace_root()
                         workspace = os.path.join(base_workspace, f"user_{user_id}")
                         os.makedirs(workspace, exist_ok=True)
                     

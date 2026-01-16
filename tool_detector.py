@@ -86,8 +86,10 @@ class ToolDetector:
             Dictionary with tool info or None if not available
         """
         try:
+            # Always use 'which' on Linux (Railway runs on Linux)
             # Check using 'which' (Linux/Mac) or 'where' (Windows)
-            if os.name == 'nt':
+            import sys
+            if os.name == 'nt' and sys.platform != 'linux':
                 result = subprocess.run(
                     ['where', tool_name],
                     capture_output=True,
@@ -95,6 +97,7 @@ class ToolDetector:
                     timeout=2
                 )
             else:
+                # Linux/Mac: use 'which'
                 result = subprocess.run(
                     ['which', tool_name],
                     capture_output=True,
