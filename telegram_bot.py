@@ -6223,6 +6223,17 @@ You've used all your available requests.
                                 logger.warning(f"[TOOL-DETECT] Could not get tools info: {e}")
                                 enhanced_message = user_message
                             
+                            # Initialize memory bank (Cursor-style external memory)
+                            from memory_bank import get_memory_bank
+                            memory_bank = get_memory_bank(workspace, user_id)
+                            memory_bank.store_task_context(
+                                task_description=user_message,
+                                current_step="Initializing",
+                                completed_steps=[],
+                                next_steps=["Reconnaissance", "Scanning", "Testing", "Exploitation"]
+                            )
+                            logger.info(f"[MEMORY-BANK] Memory bank initialized for user {user_id}")
+                            
                             # Initialize task focus manager to track and filter updates
                             from task_focus_manager import get_task_focus_manager, TaskStatus
                             task_focus = get_task_focus_manager(user_id, user_message)
@@ -6233,17 +6244,28 @@ You've used all your available requests.
                             logger.info(f"[AI-GENERATE] Requesting AI response from DeepSeek...")
                             logger.info(f"[AI-GENERATE] Enhanced message length: {len(enhanced_message)} chars")
                             
-                            # Create filtered streaming wrapper
+                            # Create filtered streaming wrapper with memory bank context
                             async def filtered_streaming_handler(message, update_obj, context_obj):
-                                """Wrapper that filters streaming updates"""
+                                """Wrapper that filters streaming updates and uses memory bank"""
                                 full_response = ""
                                 last_sent = ""
+                                
+                                # Get memory bank context (Cursor-style context building)
+                                memory_context = memory_bank.get_context_for_ai(max_tokens=1500)
+                                
+                                # Enhance message with memory context
+                                enhanced_with_memory = f"""{memory_context}
+
+**Current Request:**
+{message}
+
+**Instructions:** Use the context above to maintain focus on the task. Reference previous decisions and completed steps."""
                                 
                                 # Get AI response chunks
                                 from HacxGPT import get_brain
                                 brain = get_brain()
                                 
-                                for chunk in brain.chat(message):
+                                for chunk in brain.chat(enhanced_with_memory):
                                     full_response += chunk
                                     
                                     # Filter content before sending
@@ -6260,6 +6282,13 @@ You've used all your available requests.
                                                 logger.info(f"[TASK-FOCUS] Sent filtered update: {task_focus.current_step}")
                                             except Exception as e:
                                                 logger.warning(f"[TASK-FOCUS] Error sending filtered update: {e}")
+                                
+                                # Store decision in memory bank
+                                memory_bank.store_decision(
+                                    decision="Generated initial response",
+                                    reasoning=full_response[:200],
+                                    context=user_message
+                                )
                                 
                                 return full_response
                             
@@ -6371,6 +6400,14 @@ You've used all your available requests.
                                 logger.debug("No commands found in AI response")
                                 return ai_response
                             
+                            # Update memory bank with current step
+                            memory_bank.update_task_progress("Command Execution", "in_progress")
+                            memory_bank.store_decision(
+                                decision=f"Executing {len(parsed.get('commands', []))} commands",
+                                reasoning="Parsed AI response and extracted commands for execution",
+                                context=f"Commands: {len(parsed.get('commands', []))}, Code blocks: {len(parsed.get('code_blocks', []))}"
+                            )
+                            
                             # Execute commands automatically
                             logger.info(f"[CMD-EXEC] Found {len(parsed['commands'])} commands in AI response, starting execution...")
                             
@@ -6455,6 +6492,12 @@ You've used all your available requests.
                                 
                                 # Check if task complete
                                 if parsed['is_complete']:
+                                    memory_bank.update_task_progress("Task Complete", "completed")
+                                    memory_bank.store_decision(
+                                        decision="Task marked complete by AI",
+                                        reasoning="AI confirmed all objectives met",
+                                        context=f"Completed after {iteration} iterations"
+                                    )
                                     logger.info(f"[AI-COMPLETE] Task marked as complete by AI at iteration {iteration}")
                                     break
                                 
@@ -6497,18 +6540,31 @@ You've used all your available requests.
                                     logger.warning(f"[AUTO-CONTINUE] Could not get tools info: {e}")
                                     tools_info = ""
                                 
-                                next_prompt = f"""Previous commands executed. Results:
+                                # Get memory bank context for continuation (plan → act loop)
+                                memory_context = memory_bank.get_context_for_ai(max_tokens=1000)
+                                
+                                next_prompt = f"""{memory_context}
+
+**Previous commands executed. Results:**
 {results_summary}
 
 {tools_info}
 
 **AUTO-CONTINUATION MODE:** Continue executing commands automatically. Don't wait for user input.
+- Reference the memory context above to maintain focus on the original task
 - If commands are still running, check their status and provide updates
 - If more work is needed, generate and execute the next commands immediately
 - Only say "Task complete" when ALL work is truly finished and results are delivered
 - Use all available tools on the system (listed above)
 
 Continue with next steps NOW. Execute commands immediately."""
+                                
+                                # Store decision to continue
+                                memory_bank.store_decision(
+                                    decision="Auto-continuing task execution",
+                                    reasoning=f"Completed iteration {iteration}, continuing with next steps",
+                                    context=f"Results: {len(execution_results)} commands executed"
+                                )
                                 
                                 logger.info(f"[AUTO-CONTINUE] Continuation prompt length: {len(next_prompt)} chars")
                                 
@@ -6633,6 +6689,23 @@ Otherwise, list what still needs to be done."""
                                     logger.warning(f"[COMPLETE-CHECK] AI indicates more work needed: {verification_response[:200]}...")
                             except Exception as e:
                                 logger.warning(f"[COMPLETE-CHECK] Error in final verification: {e}")
+                            
+                            # Update memory bank - task complete
+                            final_summary_text = f"Executed {len(execution_results)} commands, {sum(1 for r in execution_results if r.get('verified', False))} verified"
+                            if files_to_send:
+                                final_summary_text += f", {len(files_to_send)} files generated"
+                            memory_bank.mark_task_complete(final_summary_text)
+                            
+                            # Store final summary in memory bank
+                            memory_bank.store_summary(
+                                'task_completion',
+                                final_summary_text,
+                                metadata={
+                                    'commands_executed': len(execution_results),
+                                    'files_generated': len(files_to_send) if files_to_send else 0,
+                                    'iterations': iteration
+                                }
+                            )
                             
                             # Update task focus - completing
                             task_focus.update_status(TaskStatus.COMPLETE, "Task completed")
