@@ -81,6 +81,9 @@ class ProgressStreamer:
                 self.details = [details] if details else []
     
     async def send_progress_update(self, force: bool = False) -> bool:
+        """Send progress update with logging"""
+        import logging
+        logger = logging.getLogger(__name__)
         """
         Send progress update if interval has passed
         Handles Telegram API timeouts and rate limits gracefully
@@ -92,6 +95,7 @@ class ProgressStreamer:
             True if update was sent, False otherwise
         """
         if not self.enabled or not self.update:
+            logger.debug(f"[PROG-UPDATE] Progress streamer disabled or no update object")
             return False
         
         current_time = time.time()
@@ -99,7 +103,10 @@ class ProgressStreamer:
         
         # Check if enough time has passed or if forced
         if not force and time_since_last < self.update_interval:
+            logger.debug(f"[PROG-UPDATE] Too soon to update ({time_since_last:.1f}s < {self.update_interval}s)")
             return False
+        
+        logger.info(f"[PROG-UPDATE] Sending progress update - Step: {self.current_step}, Progress: {self.progress_pct}%, Results: {self.results_count}")
         
         try:
             # Build progress message

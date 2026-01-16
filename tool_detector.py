@@ -63,15 +63,18 @@ class ToolDetector:
         # All tools to check
         all_tools = security_tools + system_tools + network_tools
         
-        logger.info(f"Detecting {len(all_tools)} tools...")
+        logger.info(f"[TOOL-DETECT] Detecting {len(all_tools)} tools...")
         
+        found_count = 0
         for tool in all_tools:
             tool_info = self._check_tool(tool)
             if tool_info:
                 tools[tool] = tool_info
+                found_count += 1
+                logger.debug(f"[TOOL-DETECT] Found tool: {tool} at {tool_info.get('path', 'N/A')}")
         
         self._tool_cache = tools
-        logger.info(f"Found {len(tools)} available tools")
+        logger.info(f"[TOOL-DETECT] Detection complete: Found {found_count}/{len(all_tools)} tools available")
         
         return tools
     

@@ -5110,7 +5110,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_message = update.message.text
     
-    logger.info(f"📨 Received message from user {user_id}: {user_message[:100] if user_message else 'None'}")
+    logger.info(f"[MSG-RECEIVED] User {user_id} sent message")
+    logger.info(f"[MSG-RECEIVED] Message preview: {user_message[:200] if user_message else 'None'}...")
+    logger.info(f"[MSG-RECEIVED] Message length: {len(user_message) if user_message else 0} chars")
     
     if not user_message:
         logger.debug(f"Empty message from user {user_id}, skipping")
@@ -6172,6 +6174,10 @@ You've used all your available requests.
                     # Execute with continuous checking and command execution
                     async def execute_task():
                         """Execute task with automatic command execution (Cursor-style)"""
+                        logger.info(f"[AI-WORKFLOW] Starting task execution for user {user_id}")
+                        logger.info(f"[AI-WORKFLOW] User message: {user_message[:200]}...")
+                        logger.info(f"[AI-WORKFLOW] Workspace: {workspace}")
+                        
                         try:
                             # Import command execution modules
                             from command_executor import get_command_executor
@@ -6179,24 +6185,32 @@ You've used all your available requests.
                             from auto_retry_manager import get_auto_retry_manager
                             from telegram_rate_limiter import get_telegram_rate_limiter
                             
+                            logger.info(f"[AI-WORKFLOW] Initializing command executor and parsers...")
                             command_executor = get_command_executor(workspace)
                             response_parser = get_ai_response_parser()
                             retry_manager = get_auto_retry_manager()
                             rate_limiter = get_telegram_rate_limiter()
+                            logger.info(f"[AI-WORKFLOW] Command executor and parsers initialized")
                             
                             # Get available tools info for AI
                             try:
                                 from tool_detector import get_tool_detector
+                                logger.info(f"[TOOL-DETECT] Detecting available tools...")
                                 tool_detector = get_tool_detector()
                                 tools_info = tool_detector.get_tools_summary()
+                                logger.info(f"[TOOL-DETECT] Tools detected and formatted for AI")
                                 # Add tools info to user message for AI context
                                 enhanced_message = f"{user_message}\n\n{tools_info}\n\n**IMPORTANT:** Use all available tools listed above. Check tool availability with 'which <tool>' if needed."
                             except Exception as e:
-                                logger.warning(f"Could not get tools info: {e}")
+                                logger.warning(f"[TOOL-DETECT] Could not get tools info: {e}")
                                 enhanced_message = user_message
                             
                             # Get initial AI response
+                            logger.info(f"[AI-GENERATE] Requesting AI response from DeepSeek...")
+                            logger.info(f"[AI-GENERATE] Enhanced message length: {len(enhanced_message)} chars")
+                            
                             if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
+                                logger.info(f"[AI-GENERATE] Using concurrency manager for request")
                                 async def process_message():
                                     return await desktop_handler.handle_with_streaming(
                                         enhanced_message,
@@ -6209,14 +6223,23 @@ You've used all your available requests.
                                     process_message
                                 )
                             else:
+                                logger.info(f"[AI-GENERATE] Direct AI handler call (no concurrency manager)")
                                 ai_response = await desktop_handler.handle_with_streaming(
                                     enhanced_message,
                                     update,
                                     context
                                 )
                             
+                            logger.info(f"[AI-GENERATE] AI response received: {len(ai_response)} chars")
+                            logger.info(f"[AI-GENERATE] Response preview: {ai_response[:300]}...")
+                            
                             # Parse AI response for commands
+                            logger.info(f"[AI-PARSE] Parsing AI response for commands and code blocks...")
                             parsed = response_parser.parse_ai_response(ai_response)
+                            logger.info(f"[AI-PARSE] Parsed response - Commands: {len(parsed.get('commands', []))}, Code blocks: {len(parsed.get('code_blocks', []))}, Complete: {parsed.get('is_complete', False)}")
+                            
+                            if parsed.get('commands'):
+                                logger.info(f"[AI-PARSE] Commands found: {[cmd[:50] + '...' if len(cmd) > 50 else cmd for cmd in parsed['commands'][:5]]}")
                             
                             # Validate and test code blocks before execution
                             from code_validator import get_code_validator
@@ -6303,7 +6326,7 @@ You've used all your available requests.
                                 return ai_response
                             
                             # Execute commands automatically
-                            logger.info(f"Found {len(parsed['commands'])} commands in AI response, executing...")
+                            logger.info(f"[CMD-EXEC] Found {len(parsed['commands'])} commands in AI response, starting execution...")
                             
                             execution_results = []
                             conversation_context = user_message
@@ -6312,6 +6335,7 @@ You've used all your available requests.
                             
                             while iteration < max_iterations:
                                 iteration += 1
+                                logger.info(f"[AUTO-CONTINUE] Iteration {iteration}/{max_iterations} - Processing {len(parsed.get('commands', []))} commands")
                                 
                                 # Update progress
                                 if progress_streamer:
@@ -6324,13 +6348,15 @@ You've used all your available requests.
                                 
                                 # Execute all commands
                                 for i, command in enumerate(parsed['commands'], 1):
-                                    logger.info(f"Executing command {i}/{len(parsed['commands'])}: {command}")
+                                    logger.info(f"[CMD-EXEC] Executing command {i}/{len(parsed['commands'])}: {command[:100]}...")
+                                    logger.info(f"[CMD-EXEC] Command full: {command}")
                                     
                                     # Execute with retry
                                     max_retries = 3
                                     executed = False
                                     
                                     for attempt in range(max_retries):
+                                        logger.info(f"[CMD-EXEC] Attempt {attempt + 1}/{max_retries} for command {i}")
                                         result = command_executor.execute_command(
                                             command,
                                             cwd=workspace,
@@ -6340,23 +6366,34 @@ You've used all your available requests.
                                         
                                         execution_results.append(result)
                                         
+                                        # Log detailed execution results
+                                        logger.info(f"[CMD-RESULT] Command {i} result - Exit code: {result.get('exit_code')}, Success: {result.get('success')}, Verified: {result.get('verified')}")
+                                        if result.get('stdout'):
+                                            logger.info(f"[CMD-RESULT] Command {i} stdout (first 500 chars): {result.get('stdout', '')[:500]}")
+                                        if result.get('stderr'):
+                                            logger.warning(f"[CMD-RESULT] Command {i} stderr: {result.get('stderr', '')[:500]}")
+                                        if result.get('error'):
+                                            logger.error(f"[CMD-RESULT] Command {i} error: {result.get('error')}")
+                                        
                                         # Check if verified (actually ran)
                                         if result.get('verified', False) and result.get('success', False):
                                             executed = True
-                                            logger.info(f"Command {i} executed and verified: {command}")
+                                            logger.info(f"[CMD-SUCCESS] Command {i} executed and verified successfully")
                                             break
                                         else:
+                                            logger.warning(f"[CMD-RETRY] Command {i} failed verification or execution - Success: {result.get('success')}, Verified: {result.get('verified')}")
                                             # Try alternative
                                             if attempt < max_retries - 1:
                                                 error_msg = result.get('error', '') or result.get('stderr', '') or 'Verification failed'
+                                                logger.info(f"[CMD-RETRY] Getting alternative command for: {error_msg[:200]}")
                                                 alt_command = retry_manager.retry_with_alternative(command, error_msg, attempt + 1)
                                                 if alt_command and alt_command != command:
-                                                    logger.info(f"Trying alternative: {alt_command}")
+                                                    logger.info(f"[CMD-RETRY] Trying alternative command: {alt_command[:100]}...")
                                                     command = alt_command
                                                 await asyncio.sleep(1)
                                     
                                     if not executed:
-                                        logger.warning(f"Command {i} failed after {max_retries} attempts: {command}")
+                                        logger.error(f"[CMD-FAIL] Command {i} failed after {max_retries} attempts: {command[:100]}...")
                                 
                                 # Format results for AI
                                 results_summary = "\n".join([
@@ -6370,21 +6407,27 @@ You've used all your available requests.
                                 
                                 # Check if task complete
                                 if parsed['is_complete']:
-                                    logger.info("Task marked as complete by AI")
+                                    logger.info(f"[AI-COMPLETE] Task marked as complete by AI at iteration {iteration}")
                                     break
                                 
                                 # Send progress update every minute
                                 if progress_streamer:
+                                    logger.debug(f"[PROG-UPDATE] Sending progress update (iteration {iteration})")
                                     await progress_streamer.send_progress_update(force=False)
                                 
                                 # Feed results back to AI and get next response (AUTO-CONTINUATION)
+                                logger.info(f"[AUTO-CONTINUE] Auto-prompting AI for continuation (iteration {iteration}/{max_iterations})")
+                                logger.info(f"[AUTO-CONTINUE] Execution results summary length: {len(results_summary)} chars")
+                                logger.info(f"[AUTO-CONTINUE] Total commands executed so far: {len(execution_results)}")
+                                
                                 # Get available tools info for AI
                                 try:
                                     from tool_detector import get_tool_detector
                                     tool_detector = get_tool_detector()
                                     tools_info = tool_detector.get_tools_summary()
+                                    logger.info(f"[AUTO-CONTINUE] Tools info included in continuation prompt")
                                 except Exception as e:
-                                    logger.warning(f"Could not get tools info: {e}")
+                                    logger.warning(f"[AUTO-CONTINUE] Could not get tools info: {e}")
                                     tools_info = ""
                                 
                                 next_prompt = f"""Previous commands executed. Results:
@@ -6400,23 +6443,35 @@ You've used all your available requests.
 
 Continue with next steps NOW. Execute commands immediately."""
                                 
+                                logger.info(f"[AUTO-CONTINUE] Continuation prompt length: {len(next_prompt)} chars")
+                                
                                 # Get next AI response (AUTO-PROMPT)
                                 try:
+                                    logger.info(f"[AI-GENERATE] Requesting continuation response from AI...")
                                     next_response = ""
+                                    chunk_count = 0
                                     for chunk in brain.chat(next_prompt):
                                         next_response += chunk
+                                        chunk_count += 1
+                                        if chunk_count % 100 == 0:
+                                            logger.debug(f"[AI-GENERATE] Received {chunk_count} chunks, {len(next_response)} chars so far...")
+                                    
+                                    logger.info(f"[AI-GENERATE] Continuation response received: {len(next_response)} chars, {chunk_count} chunks")
+                                    logger.info(f"[AI-GENERATE] Continuation response preview: {next_response[:300]}...")
                                     
                                     # Parse next response
+                                    logger.info(f"[AI-PARSE] Parsing continuation response...")
                                     parsed = response_parser.parse_ai_response(next_response)
+                                    logger.info(f"[AI-PARSE] Continuation parsed - Commands: {len(parsed.get('commands', []))}, Complete: {parsed.get('is_complete', False)}")
                                     
                                     # If no more commands and task complete, break
                                     if not parsed['commands'] and parsed['is_complete']:
-                                        logger.info("Task complete (no more commands)")
+                                        logger.info(f"[AI-COMPLETE] Task complete (no more commands) at iteration {iteration}")
                                         break
                                     
                                     # If no more commands but not complete, auto-prompt again
                                     if not parsed['commands'] and not parsed['is_complete']:
-                                        logger.info("No commands in response but task not complete, auto-prompting...")
+                                        logger.info(f"[AUTO-CONTINUE] No commands in response but task not complete, auto-prompting again...")
                                         await asyncio.sleep(2)
                                         # Auto-prompt: Check status and continue
                                         status_prompt = f"""Check the current status of the task. Previous results:

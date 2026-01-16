@@ -89,9 +89,13 @@ class AIResponseParser:
         # Extract expected results
         parsed['expected_results'] = self._extract_expected_results(response_text)
         
-        logger.debug(f"Parsed response: {len(parsed['commands'])} commands, "
-                    f"complete: {parsed['is_complete']}, "
-                    f"long_running: {parsed['is_long_running']}")
+        logger.info(f"[AI-PARSE] Parsed response summary:")
+        logger.info(f"[AI-PARSE]   - Commands found: {len(parsed['commands'])}")
+        logger.info(f"[AI-PARSE]   - Code blocks: {len(parsed['code_blocks'])}")
+        logger.info(f"[AI-PARSE]   - Task complete: {parsed['is_complete']}")
+        logger.info(f"[AI-PARSE]   - Long running: {parsed['is_long_running']}")
+        if parsed['commands']:
+            logger.info(f"[AI-PARSE]   - Commands: {[cmd[:50] + '...' if len(cmd) > 50 else cmd for cmd in parsed['commands'][:5]]}")
         
         return parsed
     

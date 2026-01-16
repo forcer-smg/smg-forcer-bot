@@ -154,7 +154,8 @@ class CommandExecutor:
         if not cwd:
             cwd = str(self.workspace_path)
         
-        logger.info(f"Executing command: {command} (cwd: {cwd}, timeout: {timeout}s)")
+        logger.info(f"[CMD-EXEC] Executing command: {command[:200]}... (cwd: {cwd}, timeout: {timeout}s)")
+        logger.info(f"[CMD-EXEC] Full command: {command}")
         
         start_time = time.time()
         
@@ -192,7 +193,13 @@ class CommandExecutor:
                 result['verified'] = verification['verified']
                 result['verification_details'] = verification
             
-            logger.info(f"Command executed: {command} (exit_code: {result['exit_code']}, verified: {result['verified']})")
+            logger.info(f"[CMD-EXEC] Command executed: {command[:100]}... (exit_code: {result['exit_code']}, verified: {result['verified']}, time: {result.get('execution_time', 0):.2f}s)")
+            if result.get('stdout'):
+                logger.info(f"[CMD-OUTPUT] Stdout ({len(result['stdout'])} chars): {result['stdout'][:500]}...")
+            if result.get('stderr'):
+                logger.warning(f"[CMD-ERROR] Stderr ({len(result['stderr'])} chars): {result['stderr'][:500]}...")
+            if result.get('error'):
+                logger.error(f"[CMD-ERROR] Error: {result['error']}")
             
             # Cleanup temp files (Python scripts)
             if '.py' in command and '/tmp/' in command:
