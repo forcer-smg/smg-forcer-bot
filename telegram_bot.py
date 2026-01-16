@@ -1213,7 +1213,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             original_message = plan_data.get('original_message')
             # Proceed with execution
             await query.answer("✅ Plan approved! Executing...", show_alert=False)
-            await query.edit_message_text(
+            await safe_edit_message_text(
+                query,
                 f"✅ **Plan Approved**\n\nExecuting plan...\n\n{plan_data.get('plan_text', '')[:3000]}",
                 parse_mode='Markdown',
                 reply_markup=create_mode_keyboard(user_id, context)
@@ -1231,7 +1232,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data and pending_key in context.user_data:
             del context.user_data[pending_key]
         await query.answer("❌ Plan cancelled", show_alert=False)
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             "❌ **Plan Cancelled**\n\nExecution stopped.",
             parse_mode='Markdown',
             reply_markup=create_mode_keyboard(user_id, context)
@@ -1360,7 +1362,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(welcome_message, parse_mode='Markdown', reply_markup=reply_markup)
+        await safe_edit_message_text(query, welcome_message, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "menu_status":
@@ -1462,7 +1464,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")
         ])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(status_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await safe_edit_message_text(query, status_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "menu_plans":
@@ -1505,7 +1507,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(plans_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await safe_edit_message_text(query, plans_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "menu_referral":
@@ -1547,7 +1549,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(referral_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await safe_edit_message_text(query, referral_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "menu_new":
@@ -1598,7 +1600,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         keyboard.append(get_support_button_row())
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(help_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await safe_edit_message_text(query, help_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "menu_subscribe":
@@ -1640,7 +1642,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(plans_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await safe_edit_message_text(query, plans_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data.startswith("copy_code_"):
@@ -1773,7 +1775,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            query,
             payment_text,
             parse_mode='Markdown',
             reply_markup=reply_markup
@@ -1819,7 +1822,7 @@ Or use command: /admin_upgrade USER_ID DURATION
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(upgrade_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await safe_edit_message_text(query, upgrade_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "admin_upgrade_help":
@@ -1866,7 +1869,7 @@ Or use command: /admin_upgrade USER_ID DURATION
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(help_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await safe_edit_message_text(query, help_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "admin_users":
@@ -2173,7 +2176,7 @@ Or use command: /admin_upgrade USER_ID DURATION
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(duration_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await safe_edit_message_text(query, duration_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     # Handle duration selection - show request count options
@@ -2295,7 +2298,7 @@ Or use command: /admin_upgrade USER_ID DURATION
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(requests_text, parse_mode='Markdown', reply_markup=reply_markup)
+            await safe_edit_message_text(query, requests_text, parse_mode='Markdown', reply_markup=reply_markup)
             return
             
         except (ValueError, IndexError) as e:
@@ -2378,7 +2381,7 @@ Or use command: /admin_upgrade USER_ID DURATION
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(custom_text, parse_mode='Markdown', reply_markup=reply_markup)
+            await safe_edit_message_text(query, custom_text, parse_mode='Markdown', reply_markup=reply_markup)
             
             # Store the pending upgrade in context for message handler
             context.user_data[f'pending_upgrade_{user_id}'] = {
@@ -2626,7 +2629,7 @@ Subscription will expire automatically.{admin_notice}
                 [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(success_text, parse_mode='Markdown', reply_markup=reply_markup)
+            await safe_edit_message_text(query, success_text, parse_mode='Markdown', reply_markup=reply_markup)
             
         except ValueError as e:
             logger.error(f"ValueError in upgrade callback: {e}, data: {data}", exc_info=True)
@@ -2713,7 +2716,7 @@ Subscription will expire automatically.{admin_notice}
                 payments_text = payments_text[:3900] + "\n\n... (message truncated)"
             
             # Send without parse_mode to avoid Markdown parsing errors
-            await query.edit_message_text(payments_text, reply_markup=reply_markup)
+            await safe_edit_message_text(query, payments_text, reply_markup=reply_markup)
         except Exception as e:
             logger.error(f"Error showing payments: {e}", exc_info=True)
             error_msg = f"❌ Error loading payments: {str(e)}"
@@ -2755,7 +2758,7 @@ Subscription will expire automatically.{admin_notice}
             [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(subs_text, reply_markup=reply_markup)
+        await safe_edit_message_text(query, subs_text, reply_markup=reply_markup)
         return
     
     elif data == "admin_stats":
@@ -2849,7 +2852,7 @@ Subscription will expire automatically.{admin_notice}
                 [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(stats_text, parse_mode='Markdown', reply_markup=reply_markup)
+            await safe_edit_message_text(query, stats_text, parse_mode='Markdown', reply_markup=reply_markup)
         except Exception as e:
             logger.error(f"Error showing statistics: {e}", exc_info=True)
             error_msg = f"❌ Error: {str(e)[:100]}"  # Limit error message length
@@ -2893,7 +2896,7 @@ Subscription will expire automatically.{admin_notice}
                 [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(dashboard_text, parse_mode='Markdown', reply_markup=reply_markup)
+            await safe_edit_message_text(query, dashboard_text, parse_mode='Markdown', reply_markup=reply_markup)
         except Exception as e:
             logger.error(f"Error showing dashboard: {e}", exc_info=True)
             await query.answer(f"❌ Error: {str(e)}", show_alert=True)
@@ -4849,7 +4852,7 @@ async def handle_enhancement_request(query, data: str, user_id: int, context: Co
         # Get uploaded file from context
         uploaded_files = context.user_data.get('uploaded_files', [])
         if not uploaded_files:
-            await query.edit_message_text("❌ No file found. Please upload a file first.")
+            await safe_edit_message_text(query, "❌ No file found. Please upload a file first.")
             return
         
         latest_file = uploaded_files[-1]
@@ -4870,7 +4873,7 @@ async def handle_enhancement_request(query, data: str, user_id: int, context: Co
             enhancement_type = "general"
         elif data == "analyze_code":
             # Just analyze, don't enhance
-            await query.edit_message_text("🔍 Analyzing code...")
+            await safe_edit_message_text(query, "🔍 Analyzing code...")
             try:
                 # Try to import DesktopAIHandler, fallback to direct brain usage
                 try:
@@ -4898,17 +4901,18 @@ async def handle_enhancement_request(query, data: str, user_id: int, context: Co
                     for chunk in brain.chat(analysis_prompt):
                         analysis_result += chunk
                 
-                await query.edit_message_text(
+                await safe_edit_message_text(
+                    query,
                     f"📊 **Code Analysis:** `{file_name}`\n\n{analysis_result[:3000]}",
                     parse_mode='Markdown'
                 )
             except Exception as e:
                 logger.error(f"Error analyzing code: {e}")
-                await query.edit_message_text(f"❌ Error analyzing code: {str(e)}")
+                await safe_edit_message_text(query, f"❌ Error analyzing code: {str(e)}")
             return
         
         # Enhance code
-        await query.edit_message_text(f"✨ Enhancing code ({enhancement_type})...")
+        await safe_edit_message_text(query, f"✨ Enhancing code ({enhancement_type})...")
         
         try:
             # Try to import DesktopAIHandler, fallback to direct brain usage
@@ -4938,9 +4942,9 @@ async def handle_enhancement_request(query, data: str, user_id: int, context: Co
                             filename=f"enhanced_{file_name}",
                             caption=f"✨ Enhanced code ({enhancement_type})"
                         )
-                    await query.edit_message_text(f"✅ Code enhanced successfully! Enhanced file sent.")
+                    await safe_edit_message_text(query, f"✅ Code enhanced successfully! Enhanced file sent.")
                 else:
-                    await query.edit_message_text("❌ Enhancement failed. File not generated.")
+                    await safe_edit_message_text(query, "❌ Enhancement failed. File not generated.")
             else:
                 # Fallback: use brain directly to enhance
                 code = Path(file_path).read_text(encoding='utf-8', errors='ignore')
@@ -4961,9 +4965,9 @@ async def handle_enhancement_request(query, data: str, user_id: int, context: Co
                             filename=f"enhanced_{file_name}",
                             caption=f"✨ Enhanced code ({enhancement_type})"
                         )
-                    await query.edit_message_text(f"✅ Code enhanced successfully! Enhanced file sent.")
+                    await safe_edit_message_text(query, f"✅ Code enhanced successfully! Enhanced file sent.")
                 else:
-                    await query.edit_message_text("❌ Enhancement failed. File not generated.")
+                    await safe_edit_message_text(query, "❌ Enhancement failed. File not generated.")
         except Exception as e:
             logger.error(f"Error enhancing code: {e}", exc_info=True)
             await query.edit_message_text(f"❌ Error enhancing code: {str(e)}")
@@ -6102,10 +6106,10 @@ You've used all your available requests.
                 context.user_data['last_task_description'] = user_message
                 context.user_data['last_task_results'] = {}
                 
-                # Create progress streamer for long tasks
+                # Create progress streamer for long tasks (60 seconds = 1 minute to avoid Telegram rate limits)
                 try:
                     from progress_streamer import create_progress_streamer
-                    progress_streamer = create_progress_streamer(update=update, context=context, update_interval=15)
+                    progress_streamer = create_progress_streamer(update=update, context=context, update_interval=60)
                     context.user_data['progress_streamer'] = progress_streamer
                 except Exception as e:
                     logger.warning(f"Could not create progress streamer: {e}")
@@ -6152,11 +6156,22 @@ You've used all your available requests.
                             retry_manager = get_auto_retry_manager()
                             rate_limiter = get_telegram_rate_limiter()
                             
+                            # Get available tools info for AI
+                            try:
+                                from tool_detector import get_tool_detector
+                                tool_detector = get_tool_detector()
+                                tools_info = tool_detector.get_tools_summary()
+                                # Add tools info to user message for AI context
+                                enhanced_message = f"{user_message}\n\n{tools_info}\n\n**IMPORTANT:** Use all available tools listed above. Check tool availability with 'which <tool>' if needed."
+                            except Exception as e:
+                                logger.warning(f"Could not get tools info: {e}")
+                                enhanced_message = user_message
+                            
                             # Get initial AI response
                             if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
                                 async def process_message():
                                     return await desktop_handler.handle_with_streaming(
-                                        user_message,
+                                        enhanced_message,
                                         update,
                                         context
                                     )
@@ -6167,7 +6182,7 @@ You've used all your available requests.
                                 )
                             else:
                                 ai_response = await desktop_handler.handle_with_streaming(
-                                    user_message,
+                                    enhanced_message,
                                     update,
                                     context
                                 )
@@ -6330,13 +6345,34 @@ You've used all your available requests.
                                     logger.info("Task marked as complete by AI")
                                     break
                                 
-                                # Feed results back to AI and get next response
+                                # Send progress update every minute
+                                if progress_streamer:
+                                    await progress_streamer.send_progress_update(force=False)
+                                
+                                # Feed results back to AI and get next response (AUTO-CONTINUATION)
+                                # Get available tools info for AI
+                                try:
+                                    from tool_detector import get_tool_detector
+                                    tool_detector = get_tool_detector()
+                                    tools_info = tool_detector.get_tools_summary()
+                                except Exception as e:
+                                    logger.warning(f"Could not get tools info: {e}")
+                                    tools_info = ""
+                                
                                 next_prompt = f"""Previous commands executed. Results:
 {results_summary}
 
-Continue with next steps. If task is complete, say "Task complete"."""
+{tools_info}
+
+**AUTO-CONTINUATION MODE:** Continue executing commands automatically. Don't wait for user input.
+- If commands are still running, check their status and provide updates
+- If more work is needed, generate and execute the next commands immediately
+- Only say "Task complete" when ALL work is truly finished and results are delivered
+- Use all available tools on the system (listed above)
+
+Continue with next steps NOW. Execute commands immediately."""
                                 
-                                # Get next AI response
+                                # Get next AI response (AUTO-PROMPT)
                                 try:
                                     next_response = ""
                                     for chunk in brain.chat(next_prompt):
@@ -6350,22 +6386,52 @@ Continue with next steps. If task is complete, say "Task complete"."""
                                         logger.info("Task complete (no more commands)")
                                         break
                                     
-                                    # If no more commands but not complete, wait a bit and check again
-                                    if not parsed['commands']:
+                                    # If no more commands but not complete, auto-prompt again
+                                    if not parsed['commands'] and not parsed['is_complete']:
+                                        logger.info("No commands in response but task not complete, auto-prompting...")
                                         await asyncio.sleep(2)
-                                        # Try one more time
-                                        final_response = ""
-                                        for chunk in brain.chat("Are there any more commands to execute? If task is complete, say 'Task complete'."):
-                                            final_response += chunk
-                                        final_parsed = response_parser.parse_ai_response(final_response)
-                                        if final_parsed['is_complete'] or not final_parsed['commands']:
+                                        # Auto-prompt: Check status and continue
+                                        status_prompt = f"""Check the current status of the task. Previous results:
+{results_summary}
+
+Are there any more commands to execute? Check for:
+- Running processes that need monitoring
+- Files that need to be checked
+- Results that need to be analyzed
+- Next steps that need to be taken
+
+If task is complete, say "Task complete". Otherwise, generate and execute the next commands NOW."""
+                                        
+                                        status_response = ""
+                                        for chunk in brain.chat(status_prompt):
+                                            status_response += chunk
+                                        status_parsed = response_parser.parse_ai_response(status_response)
+                                        
+                                        if status_parsed['is_complete']:
+                                            logger.info("Task complete after status check")
                                             break
+                                        elif status_parsed['commands']:
+                                            # Found more commands, continue with them
+                                            parsed = status_parsed
+                                            logger.info(f"Found {len(parsed['commands'])} more commands after status check")
+                                        else:
+                                            # Still no commands and not complete - wait a bit and try once more
+                                            await asyncio.sleep(3)
+                                            final_prompt = "Provide a final status update. If there are any remaining commands or checks needed, execute them now. If everything is complete, say 'Task complete'."
+                                            final_response = ""
+                                            for chunk in brain.chat(final_prompt):
+                                                final_response += chunk
+                                            final_parsed = response_parser.parse_ai_response(final_response)
+                                            if final_parsed['is_complete'] or not final_parsed['commands']:
+                                                break
+                                            else:
+                                                parsed = final_parsed
                                     
                                 except Exception as e:
                                     logger.error(f"Error getting next AI response: {e}", exc_info=True)
                                     break
                                 
-                                # Brief delay
+                                # Brief delay before next iteration
                                 await asyncio.sleep(1)
                             
                             # Return final response with execution summary

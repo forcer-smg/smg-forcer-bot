@@ -18,14 +18,14 @@ logger = logging.getLogger(__name__)
 class ProgressStreamer:
     """Stream progress updates for long-running tasks with Telegram API resilience"""
     
-    def __init__(self, update=None, context=None, update_interval: int = 15):
+    def __init__(self, update=None, context=None, update_interval: int = 60):
         """
         Initialize progress streamer
         
         Args:
             update: Telegram Update object (optional)
             context: Telegram Context object (optional)
-            update_interval: Seconds between updates (default: 15)
+            update_interval: Seconds between updates (default: 60 - 1 minute to avoid rate limits)
         """
         self.update = update
         self.context = context
@@ -105,55 +105,45 @@ class ProgressStreamer:
             # Build progress message
             message = self._build_progress_message()
             
+            # For progress updates, ALWAYS send new messages instead of editing
+            # This avoids 400 errors from rapid edits and is more reliable
+            # With 60-second intervals, we should never hit rate limits
+            if not self.update or not self.update.message:
+                return False
+            
             # Use rate limiter if available
             if self.rate_limiter:
                 try:
-                    # Wait if needed to avoid rate limit
-                    await self.rate_limiter.wait_if_needed()
+                    # Wait if needed to avoid rate limit (shouldn't be needed with 60s intervals)
+                    chat_id = self.update.effective_chat.id if self.update.effective_chat else None
+                    if chat_id:
+                        await self.rate_limiter.wait_if_needed(chat_id)
                     
-                    # Send with retry
-                    if self.last_message:
-                        # Try to edit existing message with retry
-                        async def edit_message():
-                            try:
-                                await self.last_message.edit_text(message, parse_mode='Markdown')
-                            except Exception as e:
-                                # If edit fails, send new message
-                                logger.debug(f"Could not edit progress message: {e}")
-                                self.last_message = await self.update.message.reply_text(message, parse_mode='Markdown')
-                        
-                        await self.rate_limiter.send_with_retry(edit_message, max_retries=2)
-                    else:
-                        # Send first message with retry
-                        async def send_message():
-                            return await self.update.message.reply_text(message, parse_mode='Markdown')
-                        
-                        self.last_message = await self.rate_limiter.send_with_retry(send_message, max_retries=2)
+                    # Always send new message (don't edit) - prevents 400 errors
+                    async def send_message():
+                        return await self.update.message.reply_text(message, parse_mode='Markdown')
+                    
+                    self.last_message = await self.rate_limiter.send_with_retry(send_message, max_retries=2)
                     
                     # Record message sent
-                    if self.rate_limiter:
-                        self.rate_limiter.record_message_sent()
+                    if self.rate_limiter and chat_id:
+                        self.rate_limiter.record_message_sent(chat_id)
                     
                 except Exception as e:
                     logger.warning(f"Error sending progress update (with rate limiter): {e}")
-                    # Fallback to direct send
-                    if self.last_message:
-                        try:
-                            await self.last_message.edit_text(message, parse_mode='Markdown')
-                        except:
-                            self.last_message = await self.update.message.reply_text(message, parse_mode='Markdown')
-                    else:
+                    # Fallback: direct send with error handling
+                    try:
                         self.last_message = await self.update.message.reply_text(message, parse_mode='Markdown')
+                    except Exception as e2:
+                        logger.warning(f"Fallback send also failed: {e2}")
+                        return False
             else:
                 # Fallback: direct send without rate limiter
-                if self.last_message:
-                    try:
-                        await self.last_message.edit_text(message, parse_mode='Markdown')
-                    except Exception as e:
-                        logger.debug(f"Could not edit progress message: {e}")
-                        self.last_message = await self.update.message.reply_text(message, parse_mode='Markdown')
-                else:
+                try:
                     self.last_message = await self.update.message.reply_text(message, parse_mode='Markdown')
+                except Exception as e:
+                    logger.warning(f"Error sending progress update: {e}")
+                    return False
             
             self.last_update = current_time
             

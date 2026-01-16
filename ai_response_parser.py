@@ -125,6 +125,90 @@ class AIResponseParser:
         
         return code_blocks
     
+    def _validate_code_block(self, block: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate a code block and return validated version (may be auto-fixed)
+        
+        Args:
+            block: Code block dictionary with 'language', 'content', etc.
+        
+        Returns:
+            Validated code block (may have modified content if auto-fixed)
+        """
+        validated_block = block.copy()
+        language = block.get('language', 'bash')
+        content = block.get('content', '')
+        
+        # Basic validation: check if content is not empty
+        if not content or not content.strip():
+            validated_block['valid'] = False
+            validated_block['errors'] = ['Code block is empty']
+            return validated_block
+        
+        # For Python blocks, check for basic syntax issues
+        if language == 'python':
+            # Check for common issues
+            errors = []
+            
+            # Check for unclosed quotes
+            single_quotes = content.count("'") - content.count("\\'")
+            double_quotes = content.count('"') - content.count('\\"')
+            if single_quotes % 2 != 0:
+                errors.append('Unclosed single quote')
+            if double_quotes % 2 != 0:
+                errors.append('Unclosed double quote')
+            
+            # Check for unclosed parentheses/brackets
+            paren_diff = content.count('(') - content.count(')')
+            bracket_diff = content.count('[') - content.count(']')
+            brace_diff = content.count('{') - content.count('}')
+            
+            if paren_diff != 0:
+                errors.append(f'Unclosed parentheses (difference: {paren_diff})')
+            if bracket_diff != 0:
+                errors.append(f'Unclosed brackets (difference: {bracket_diff})')
+            if brace_diff != 0:
+                errors.append(f'Unclosed braces (difference: {brace_diff})')
+            
+            if errors:
+                validated_block['valid'] = False
+                validated_block['errors'] = errors
+            else:
+                validated_block['valid'] = True
+                validated_block['errors'] = []
+        
+        # For bash/shell blocks, check for basic issues
+        elif language in ['bash', 'sh', 'shell', 'zsh']:
+            errors = []
+            
+            # Check for unclosed quotes
+            single_quotes = content.count("'") - content.count("\\'")
+            double_quotes = content.count('"') - content.count('\\"')
+            if single_quotes % 2 != 0:
+                errors.append('Unclosed single quote')
+            if double_quotes % 2 != 0:
+                errors.append('Unclosed double quote')
+            
+            # Check for unclosed heredoc
+            heredoc_count = len(re.findall(r'<<\s*[\'"]?EOF', content, re.IGNORECASE))
+            eof_count = len(re.findall(r'^EOF\s*$', content, re.MULTILINE | re.IGNORECASE))
+            if heredoc_count > eof_count:
+                errors.append('Unclosed heredoc (missing EOF)')
+            
+            if errors:
+                validated_block['valid'] = False
+                validated_block['errors'] = errors
+            else:
+                validated_block['valid'] = True
+                validated_block['errors'] = []
+        
+        else:
+            # For other languages, just check if not empty
+            validated_block['valid'] = bool(content.strip())
+            validated_block['errors'] = [] if validated_block['valid'] else ['Code block is empty']
+        
+        return validated_block
+    
     def extract_commands(self, code_content: str, language: str = 'bash') -> List[str]:
         """
         Extract executable commands from code block content

@@ -155,15 +155,34 @@ class JobWorker:
             
             bot = self.bot_application.bot
             
+            # For progress updates, prefer sending new messages instead of editing
+            # This avoids 400 errors from rapid edits
             if message_id and not is_final:
-                # Edit existing message
+                # Try to use safe_edit_message_text wrapper
                 try:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        text=text[:4000],  # Telegram limit
-                        parse_mode='Markdown'
-                    )
+                    from telegram_bot import safe_edit_message_text
+                    
+                    # Create a synthetic query-like object for safe_edit_message_text
+                    class SyntheticQuery:
+                        def __init__(self, bot, chat_id, message_id):
+                            self.bot = bot
+                            self.message = type('Message', (), {
+                                'chat': type('Chat', (), {'id': chat_id})(),
+                                'message_id': message_id
+                            })()
+                        
+                        async def edit_message_text(self, text, parse_mode=None, **kwargs):
+                            return await self.bot.edit_message_text(
+                                chat_id=self.message.chat.id,
+                                message_id=self.message.message_id,
+                                text=text,
+                                parse_mode=parse_mode,
+                                **kwargs
+                            )
+                    
+                    synthetic_query = SyntheticQuery(bot, chat_id, message_id)
+                    await safe_edit_message_text(synthetic_query, text[:4000], parse_mode='Markdown')
+                    
                     # Record send
                     if self.telegram_limiter:
                         self.telegram_limiter.record_message_sent(chat_id)
@@ -173,7 +192,7 @@ class JobWorker:
                     logger.debug(f"Edit failed, sending new message: {e}")
                     message_id = None
             
-            # Send new message
+            # Send new message (preferred for progress updates)
             message = await bot.send_message(
                 chat_id=chat_id,
                 text=text[:4000],

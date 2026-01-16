@@ -361,10 +361,11 @@ COMMAND EXECUTION RULES:
 
 LONG-RUNNING TASKS (Scans, etc.):
 - For long-running tasks (scans, enumeration, etc.), system will stream progress automatically
-- Progress updates sent every 10-30 seconds to user
+- Progress updates sent every 60 seconds (1 minute) to user to avoid Telegram rate limits
 - System handles Telegram API timeouts and rate limits automatically
 - You don't need to worry about timeouts - just generate commands and system handles execution
 - System monitors command output in real-time and feeds partial results to you as they come in
+- System will AUTO-CONTINUE: automatically prompt itself for updates and continue execution without waiting for user input
 
 AUTO-RETRY (Like Cursor):
 - If a command fails, system automatically analyzes error
@@ -379,11 +380,14 @@ COMMAND VERIFICATION (No False Positives):
 - No false positives - if verification fails, command is retried with alternative
 - You receive verification status with each command result
 
-CONTINUOUS EXECUTION:
+CONTINUOUS EXECUTION (AUTO-CONTINUATION):
 - System keeps executing commands until task is complete
+- System will AUTO-PROMPT itself for updates - you don't need to wait for user input
+- System automatically continues execution by prompting itself: "Check status, continue with next steps"
 - Loop stops when: You say "Task complete" OR no more commands generated OR max iterations reached
 - System uses all available resources to complete tasks
 - For long tasks, system checkpoints progress for resumability
+- System detects all available tools on the system and provides them to you - USE ALL AVAILABLE TOOLS
 
 RESPONSE FORMAT:
 - Generate commands in code blocks: ```bash\ncommand here\n```
