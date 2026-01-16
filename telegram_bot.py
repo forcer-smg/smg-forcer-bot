@@ -6223,18 +6223,50 @@ You've used all your available requests.
                                 logger.warning(f"[TOOL-DETECT] Could not get tools info: {e}")
                                 enhanced_message = user_message
                             
-                            # Get initial AI response
+                            # Initialize task focus manager to track and filter updates
+                            from task_focus_manager import get_task_focus_manager, TaskStatus
+                            task_focus = get_task_focus_manager(user_id, user_message)
+                            task_focus.update_status(TaskStatus.STARTING, "Initializing attack plan")
+                            logger.info(f"[TASK-FOCUS] Task focus initialized for user {user_id}: {user_message[:100]}")
+                            
+                            # Get initial AI response (with filtered streaming)
                             logger.info(f"[AI-GENERATE] Requesting AI response from DeepSeek...")
                             logger.info(f"[AI-GENERATE] Enhanced message length: {len(enhanced_message)} chars")
+                            
+                            # Create filtered streaming wrapper
+                            async def filtered_streaming_handler(message, update_obj, context_obj):
+                                """Wrapper that filters streaming updates"""
+                                full_response = ""
+                                last_sent = ""
+                                
+                                # Get AI response chunks
+                                from HacxGPT import get_brain
+                                brain = get_brain()
+                                
+                                for chunk in brain.chat(message):
+                                    full_response += chunk
+                                    
+                                    # Filter content before sending
+                                    if task_focus.should_send_update(full_response):
+                                        filtered = task_focus.filter_content_for_telegram(full_response)
+                                        if filtered and filtered != last_sent:
+                                            try:
+                                                # Send only meaningful update
+                                                await update_obj.message.reply_text(
+                                                    f"**{task_focus.current_step}**\n\n{filtered[:1000]}...",
+                                                    parse_mode='Markdown'
+                                                )
+                                                last_sent = filtered
+                                                logger.info(f"[TASK-FOCUS] Sent filtered update: {task_focus.current_step}")
+                                            except Exception as e:
+                                                logger.warning(f"[TASK-FOCUS] Error sending filtered update: {e}")
+                                
+                                return full_response
                             
                             if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
                                 logger.info(f"[AI-GENERATE] Using concurrency manager for request")
                                 async def process_message():
-                                    return await desktop_handler.handle_with_streaming(
-                                        enhanced_message,
-                                        update,
-                                        context
-                                    )
+                                    return await filtered_streaming_handler(enhanced_message, update, context)
                                 
                                 ai_response = await concurrency_manager.process_request(
                                     user_id,
@@ -6242,11 +6274,7 @@ You've used all your available requests.
                                 )
                             else:
                                 logger.info(f"[AI-GENERATE] Direct AI handler call (no concurrency manager)")
-                                ai_response = await desktop_handler.handle_with_streaming(
-                                    enhanced_message,
-                                    update,
-                                    context
-                                )
+                                ai_response = await filtered_streaming_handler(enhanced_message, update, context)
                             
                             logger.info(f"[AI-GENERATE] AI response received: {len(ai_response)} chars")
                             logger.info(f"[AI-GENERATE] Response preview: {ai_response[:300]}...")
@@ -6364,10 +6392,12 @@ You've used all your available requests.
                                     )
                                     await progress_streamer.send_progress_update()
                                 
-                                # Execute all commands
+                                # Execute all commands (suppress individual command updates)
                                 for i, command in enumerate(parsed['commands'], 1):
                                     logger.info(f"[CMD-EXEC] Executing command {i}/{len(parsed['commands'])}: {command[:100]}...")
                                     logger.info(f"[CMD-EXEC] Command full: {command}")
+                                    
+                                    # Don't send individual command updates to Telegram (suppressed by task focus)
                                     
                                     # Execute with retry
                                     max_retries = 3
@@ -6604,10 +6634,19 @@ Otherwise, list what still needs to be done."""
                             except Exception as e:
                                 logger.warning(f"[COMPLETE-CHECK] Error in final verification: {e}")
                             
-                            # Return final response with execution summary
-                            final_summary = f"{ai_response}\n\n**Commands Executed:** {len(execution_results)}\n**Verified:** {sum(1 for r in execution_results if r.get('verified', False))}"
+                            # Update task focus - completing
+                            task_focus.update_status(TaskStatus.COMPLETE, "Task completed")
+                            task_focus.commands_executed = len(execution_results)
+                            
+                            # Return final response with execution summary (filtered)
+                            final_summary = task_focus.get_summary()
+                            final_summary += f"\n\n**Commands Executed:** {len(execution_results)}\n**Verified:** {sum(1 for r in execution_results if r.get('verified', False))}"
                             if files_to_send:
                                 final_summary += f"\n\n**Files Generated:** {len(files_to_send)} (will be sent)"
+                            
+                            # Clear task focus after completion
+                            from task_focus_manager import clear_task_focus
+                            clear_task_focus(user_id)
                             
                             return final_summary
                             
