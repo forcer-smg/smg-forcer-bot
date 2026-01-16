@@ -462,7 +462,16 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
         except RetryAfter as e:
             # Telegram's RetryAfter exception - has retry_after attribute
             retry_after = e.retry_after
-            logger.warning(f"Rate limit hit on edit_message_text for {message_id} - Retry-After: {retry_after}s")
+            logger.warning(f"[RATE-LIMIT] Rate limit hit on edit_message_text for {message_id} - Retry-After: {retry_after}s")
+            
+            # Record rate limit event for pause/resume management
+            try:
+                from telegram_rate_limit_manager import get_rate_limit_manager
+                rate_limit_mgr = get_rate_limit_manager()
+                if chat_id:
+                    rate_limit_mgr.record_rate_limit(chat_id, retry_after)
+            except Exception as rate_err:
+                logger.warning(f"[RATE-LIMIT] Error recording rate limit: {rate_err}")
             
             # Handle rate limit with Retry-After (per-chat) - with jitter
             if rate_limiter and chat_id:
@@ -486,7 +495,7 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
             
             # Handle 429 rate limit errors (fallback if RetryAfter exception not caught)
             if '429' in error_str or 'too many requests' in error_str or 'rate limit' in error_str:
-                logger.warning(f"Rate limit hit on edit_message_text for {message_id} (BadRequest)")
+                logger.warning(f"[RATE-LIMIT] Rate limit hit on edit_message_text for {message_id} (BadRequest)")
                 
                 # Try to extract Retry-After from error message
                 retry_after = None
@@ -498,6 +507,15 @@ async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown',
                             retry_after = int(match.group(1))
                 except Exception as parse_error:
                     logger.debug(f"Could not parse retry_after: {parse_error}")
+                
+                # Record rate limit event for pause/resume management
+                try:
+                    from telegram_rate_limit_manager import get_rate_limit_manager
+                    rate_limit_mgr = get_rate_limit_manager()
+                    if chat_id:
+                        rate_limit_mgr.record_rate_limit(chat_id, retry_after)
+                except Exception as rate_err:
+                    logger.warning(f"[RATE-LIMIT] Error recording rate limit: {rate_err}")
                 
                 # Handle rate limit with Retry-After (per-chat)
                 if rate_limiter and chat_id:
@@ -6410,10 +6428,29 @@ You've used all your available requests.
                                     logger.info(f"[AI-COMPLETE] Task marked as complete by AI at iteration {iteration}")
                                     break
                                 
-                                # Send progress update every minute
-                                if progress_streamer:
-                                    logger.debug(f"[PROG-UPDATE] Sending progress update (iteration {iteration})")
-                                    await progress_streamer.send_progress_update(force=False)
+                                # Check rate limits before sending progress update
+                                try:
+                                    from telegram_rate_limit_manager import get_rate_limit_manager
+                                    rate_limit_mgr = get_rate_limit_manager()
+                                    chat_id = update.effective_chat.id if update.effective_chat else None
+                                    
+                                    if chat_id and rate_limit_mgr.is_paused(chat_id):
+                                        pause_remaining = rate_limit_mgr.get_pause_remaining(chat_id)
+                                        logger.info(f"[RATE-LIMIT] Updates paused for chat {chat_id}, remaining: {pause_remaining:.1f}s")
+                                        # Wait for pause to end
+                                        if pause_remaining and pause_remaining > 0:
+                                            await asyncio.sleep(min(pause_remaining, 60))  # Wait up to 60s
+                                    elif chat_id and rate_limit_mgr.should_send_update(chat_id):
+                                        # Send progress update every minute
+                                        if progress_streamer:
+                                            logger.debug(f"[PROG-UPDATE] Sending progress update (iteration {iteration})")
+                                            await progress_streamer.send_progress_update(force=False)
+                                            rate_limit_mgr.record_successful_send(chat_id)
+                                except Exception as e:
+                                    logger.warning(f"[RATE-LIMIT] Error checking rate limits: {e}")
+                                    # Fallback: send update anyway
+                                    if progress_streamer:
+                                        await progress_streamer.send_progress_update(force=False)
                                 
                                 # Feed results back to AI and get next response (AUTO-CONTINUATION)
                                 logger.info(f"[AUTO-CONTINUE] Auto-prompting AI for continuation (iteration {iteration}/{max_iterations})")
@@ -6517,8 +6554,61 @@ If task is complete, say "Task complete". Otherwise, generate and execute the ne
                                 # Brief delay before next iteration
                                 await asyncio.sleep(1)
                             
+                            # Final verification: Check if all files are sent before completing
+                            logger.info(f"[COMPLETE-CHECK] Starting final completion verification...")
+                            
+                            # Check for generated files that need to be sent
+                            generated_files = context.user_data.get('generated_files', [])
+                            files_to_send = []
+                            if generated_files:
+                                from pathlib import Path
+                                for file_path in generated_files:
+                                    if file_path and Path(file_path).exists():
+                                        files_to_send.append(file_path)
+                                        logger.info(f"[COMPLETE-CHECK] File pending send: {file_path}")
+                            
+                            # If there are files to send, verify they're sent before completing
+                            if files_to_send:
+                                logger.info(f"[COMPLETE-CHECK] {len(files_to_send)} files need to be sent before task completion")
+                                # The files will be sent in the main handler after this function returns
+                                # We'll verify completion after files are sent
+                            
+                            # Final AI prompt to verify everything is done
+                            final_verification_prompt = f"""Final verification check:
+
+Commands executed: {len(execution_results)}
+Files generated: {len(files_to_send)}
+Results: {len(execution_results)} commands completed
+
+Verify:
+1. All commands have been executed successfully
+2. All files have been generated
+3. All results have been collected
+4. Task objectives have been met
+
+If EVERYTHING is complete and ready to send to user, say "Task complete - all files ready".
+Otherwise, list what still needs to be done."""
+                            
+                            try:
+                                logger.info(f"[COMPLETE-CHECK] Requesting final verification from AI...")
+                                verification_response = ""
+                                for chunk in brain.chat(final_verification_prompt):
+                                    verification_response += chunk
+                                
+                                verification_parsed = response_parser.parse_ai_response(verification_response)
+                                
+                                if verification_parsed.get('is_complete') or 'all files ready' in verification_response.lower():
+                                    logger.info(f"[COMPLETE-CHECK] AI confirmed task complete - all files ready")
+                                else:
+                                    logger.warning(f"[COMPLETE-CHECK] AI indicates more work needed: {verification_response[:200]}...")
+                            except Exception as e:
+                                logger.warning(f"[COMPLETE-CHECK] Error in final verification: {e}")
+                            
                             # Return final response with execution summary
                             final_summary = f"{ai_response}\n\n**Commands Executed:** {len(execution_results)}\n**Verified:** {sum(1 for r in execution_results if r.get('verified', False))}"
+                            if files_to_send:
+                                final_summary += f"\n\n**Files Generated:** {len(files_to_send)} (will be sent)"
+                            
                             return final_summary
                             
                         except Exception as e:
@@ -6770,9 +6860,28 @@ If task is complete, say "Task complete". Otherwise, generate and execute the ne
                 except Exception as e:
                     logger.error(f"Error sending screenshots: {e}")
             
-            # Send generated files if any
+            # Send generated files if any (with rate limit checking)
             generated_files = context.user_data.get('generated_files', [])
+            files_sent_count = 0
+            files_failed_count = 0
+            
             if generated_files:
+                logger.info(f"[FILE-SEND] Starting to send {len(generated_files)} generated files to Telegram...")
+                
+                # Check rate limits before sending files
+                try:
+                    from telegram_rate_limit_manager import get_rate_limit_manager
+                    rate_limit_mgr = get_rate_limit_manager()
+                    chat_id = update.effective_chat.id if update.effective_chat else None
+                    
+                    if chat_id and rate_limit_mgr.is_paused(chat_id):
+                        pause_remaining = rate_limit_mgr.get_pause_remaining(chat_id)
+                        logger.warning(f"[RATE-LIMIT] File sending paused for chat {chat_id}, waiting {pause_remaining:.1f}s...")
+                        if pause_remaining and pause_remaining > 0:
+                            await asyncio.sleep(min(pause_remaining, 120))  # Wait up to 2 minutes
+                            rate_limit_mgr.resume_chat(chat_id)  # Resume after waiting
+                except Exception as e:
+                    logger.warning(f"[RATE-LIMIT] Error checking rate limits before file send: {e}")
                 try:
                     from file_generator import is_file_size_valid, MAX_FILE_SIZE
                     from pathlib import Path
@@ -6849,6 +6958,20 @@ If task is complete, say "Task complete". Otherwise, generate and execute the ne
                         # Check file size
                         if is_file_size_valid(file_path):
                             try:
+                                # Check rate limit before sending each file
+                                chat_id = update.effective_chat.id if update.effective_chat else None
+                                try:
+                                    from telegram_rate_limit_manager import get_rate_limit_manager
+                                    rate_limit_mgr = get_rate_limit_manager()
+                                    if chat_id and rate_limit_mgr.is_paused(chat_id):
+                                        pause_remaining = rate_limit_mgr.get_pause_remaining(chat_id)
+                                        logger.warning(f"[RATE-LIMIT] Paused before sending file {Path(file_path).name}, waiting {pause_remaining:.1f}s...")
+                                        if pause_remaining and pause_remaining > 0:
+                                            await asyncio.sleep(min(pause_remaining, 60))
+                                            rate_limit_mgr.resume_chat(chat_id)
+                                except Exception:
+                                    pass
+                                
                                 with open(file_path, 'rb') as f:
                                     # Add mode keyboard to file sending
                                     file_keyboard = ensure_mode_keyboard_at_bottom(user_id, context)
@@ -6865,9 +6988,39 @@ If task is complete, say "Task complete". Otherwise, generate and execute the ne
                                         parse_mode='Markdown',
                                         reply_markup=file_keyboard
                                     )
-                                logger.info(f"Sent file: {file_path}")
+                                files_sent_count += 1
+                                logger.info(f"[FILE-SEND] Successfully sent file {files_sent_count}/{len(generated_files)}: {file_path}")
+                                
+                                # Record successful send to reset rate limit counter
+                                try:
+                                    from telegram_rate_limit_manager import get_rate_limit_manager
+                                    rate_limit_mgr = get_rate_limit_manager()
+                                    if chat_id:
+                                        rate_limit_mgr.record_successful_send(chat_id)
+                                except Exception:
+                                    pass
+                                
+                                # Small delay between files to avoid rate limits
+                                await asyncio.sleep(1)
                             except Exception as e:
-                                logger.error(f"Failed to send file {file_path}: {e}")
+                                files_failed_count += 1
+                                logger.error(f"[FILE-SEND] Failed to send file {file_path}: {e}")
+                                
+                                # Check if it's a rate limit error
+                                if '429' in str(e) or 'Too Many Requests' in str(e) or 'rate limit' in str(e).lower():
+                                    logger.warning(f"[RATE-LIMIT] Rate limit hit while sending file, pausing...")
+                                    try:
+                                        from telegram_rate_limit_manager import get_rate_limit_manager
+                                        rate_limit_mgr = get_rate_limit_manager()
+                                        if chat_id:
+                                            rate_limit_mgr.record_rate_limit(chat_id)
+                                            # Wait before continuing
+                                            pause_remaining = rate_limit_mgr.get_pause_remaining(chat_id) or 60
+                                            logger.info(f"[RATE-LIMIT] Waiting {pause_remaining}s before resuming file sends...")
+                                            await asyncio.sleep(min(pause_remaining, 120))
+                                    except Exception as rate_err:
+                                        logger.warning(f"[RATE-LIMIT] Error handling rate limit: {rate_err}")
+                                        await asyncio.sleep(60)  # Default wait
                         else:
                             file_size = Path(file_path).stat().st_size
                             file_keyboard = ensure_mode_keyboard_at_bottom(user_id, context)
@@ -6878,7 +7031,59 @@ If task is complete, say "Task complete". Otherwise, generate and execute the ne
                                 reply_markup=file_keyboard
                             )
                 except Exception as e:
-                    logger.error(f"Error sending files: {e}")
+                    logger.error(f"[FILE-SEND] Error sending files: {e}")
+                
+                # Final verification: Check if all files were sent
+                logger.info(f"[FILE-SEND] File sending complete - Sent: {files_sent_count}/{len(generated_files)}, Failed: {files_failed_count}")
+                
+                if files_failed_count > 0:
+                    logger.warning(f"[FILE-SEND] {files_failed_count} files failed to send - may need retry")
+                
+                # Mark files as sent in context for completion verification
+                context.user_data['files_sent'] = files_sent_count
+                context.user_data['files_failed'] = files_failed_count
+                context.user_data['all_files_sent'] = (files_sent_count == len(generated_files))
+                
+                # Final completion check: Verify all files sent before marking complete
+                if files_sent_count < len(generated_files):
+                    logger.warning(f"[COMPLETE-CHECK] Not all files sent ({files_sent_count}/{len(generated_files)}) - task may not be fully complete")
+                else:
+                    logger.info(f"[COMPLETE-CHECK] All {files_sent_count} files successfully sent to Telegram - task complete")
+                
+                # Final AI prompt to verify everything is done and all files sent
+                if files_sent_count == len(generated_files) and len(generated_files) > 0:
+                    logger.info(f"[COMPLETE-CHECK] All files sent, requesting final AI confirmation...")
+                    try:
+                        final_completion_prompt = f"""Final completion verification:
+
+✅ Commands executed: {len(execution_results)}
+✅ Files generated: {len(generated_files)}
+✅ Files sent to Telegram: {files_sent_count}/{len(generated_files)}
+
+Verify that:
+1. All commands executed successfully
+2. All files generated
+3. All files sent to Telegram
+4. Task objectives met
+5. User has received all results
+
+If EVERYTHING is complete and user has received all files, say "Task complete - all files sent to user".
+Otherwise, list what still needs to be done."""
+                        
+                        verification_response = ""
+                        for chunk in brain.chat(final_completion_prompt):
+                            verification_response += chunk
+                        
+                        verification_parsed = response_parser.parse_ai_response(verification_response)
+                        
+                        if verification_parsed.get('is_complete') or 'all files sent' in verification_response.lower():
+                            logger.info(f"[COMPLETE-CHECK] AI confirmed: Task complete - all files sent to user")
+                            context.user_data['task_fully_complete'] = True
+                        else:
+                            logger.warning(f"[COMPLETE-CHECK] AI indicates more work needed: {verification_response[:200]}...")
+                            context.user_data['task_fully_complete'] = False
+                    except Exception as e:
+                        logger.warning(f"[COMPLETE-CHECK] Error in final completion verification: {e}")
                 
                 # Clean up files after sending
                 try:
