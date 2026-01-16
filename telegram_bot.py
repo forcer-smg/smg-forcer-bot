@@ -6265,23 +6265,59 @@ You've used all your available requests.
                                 from HacxGPT import get_brain
                                 brain = get_brain()
                                 
+                                # SUPPRESS ALL STREAMING DURING AI RESPONSE - only send final result
+                                # This prevents hundreds of messages during response generation
                                 for chunk in brain.chat(enhanced_with_memory):
                                     full_response += chunk
-                                    
-                                    # Filter content before sending
-                                    if task_focus.should_send_update(full_response):
-                                        filtered = task_focus.filter_content_for_telegram(full_response)
-                                        if filtered and filtered != last_sent:
-                                            try:
-                                                # Send only meaningful update
+                                    # DO NOT send updates during streaming - wait for complete response
+                                
+                                # Only send ONE update after complete response (if significant)
+                                if task_focus.should_send_update(full_response):
+                                    filtered = task_focus.filter_content_for_telegram(full_response)
+                                    if filtered:
+                                        try:
+                                            # Check rate limits before sending
+                                            from telegram_rate_limit_manager import get_rate_limit_manager
+                                            rate_limit_mgr = get_rate_limit_manager()
+                                            chat_id = update_obj.effective_chat.id if update_obj.effective_chat else None
+                                            
+                                            if chat_id and rate_limit_mgr.is_paused(chat_id):
+                                                pause_remaining = rate_limit_mgr.get_pause_remaining(chat_id)
+                                                task_focus.mark_rate_limited(int(pause_remaining) if pause_remaining else 60)
+                                                logger.warning(f"[TASK-FOCUS] Rate limited - skipping update, paused for {pause_remaining:.1f}s")
+                                            else:
+                                                # Send only ONE meaningful update after complete response
                                                 await update_obj.message.reply_text(
-                                                    f"**{task_focus.current_step}**\n\n{filtered[:1000]}...",
+                                                    f"**{task_focus.current_step}**\n\n{filtered[:1500]}...",
                                                     parse_mode='Markdown'
                                                 )
-                                                last_sent = filtered
-                                                logger.info(f"[TASK-FOCUS] Sent filtered update: {task_focus.current_step}")
-                                            except Exception as e:
-                                                logger.warning(f"[TASK-FOCUS] Error sending filtered update: {e}")
+                                                task_focus.last_update_time = time.time()
+                                                task_focus.last_sent_message = filtered
+                                                logger.info(f"[TASK-FOCUS] Sent single update after complete response: {task_focus.current_step}")
+                                                
+                                                # Record successful send
+                                                if chat_id:
+                                                    rate_limit_mgr.record_successful_send(chat_id)
+                                        except Exception as e:
+                                            error_str = str(e).lower()
+                                            if '429' in error_str or 'rate limit' in error_str or 'too many requests' in error_str:
+                                                # Extract retry_after if available
+                                                retry_after = 120  # Default 2 minutes
+                                                if 'retry_after' in error_str:
+                                                    import re
+                                                    match = re.search(r'retry_after[:\s]+(\d+)', error_str)
+                                                    if match:
+                                                        retry_after = int(match.group(1)) + 10  # Add buffer
+                                                
+                                                task_focus.mark_rate_limited(retry_after)
+                                                if chat_id:
+                                                    rate_limit_mgr.record_rate_limit(chat_id, retry_after)
+                                                logger.error(f"[TASK-FOCUS] Rate limited - pausing ALL updates for {retry_after}s")
+                                            elif '400' in error_str or 'bad request' in error_str:
+                                                logger.error(f"[TASK-FOCUS] 400 Bad Request - stopping updates for this message")
+                                                # Don't retry 400 errors
+                                            else:
+                                                logger.warning(f"[TASK-FOCUS] Error sending update: {e}")
                                 
                                 # Store decision in memory bank
                                 memory_bank.store_decision(

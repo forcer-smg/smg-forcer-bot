@@ -43,10 +43,15 @@ class TaskFocusManager:
         self.vulnerabilities_found = []
         self.errors = []
         
-        # Filtering settings
-        self.min_update_interval = 30  # Minimum seconds between updates
-        self.min_content_change = 200  # Minimum characters changed before sending update
+        # Filtering settings (VERY AGGRESSIVE to prevent rate limits)
+        self.min_update_interval = 180  # Minimum 3 minutes between updates (was 30s, then 120s)
+        self.min_content_change = 1000  # Minimum 1000 characters changed (was 200, then 500)
         self.suppress_command_streaming = True  # Don't stream individual commands
+        self.message_queue = []  # Queue messages instead of sending immediately
+        self.last_sent_time = 0
+        self.consecutive_skips = 0
+        self.rate_limited = False  # Track if we're rate limited
+        self.rate_limit_until = 0  # Timestamp when rate limit expires
         
     def update_status(self, status: TaskStatus, step: str = None, details: str = None):
         """Update current task status"""
@@ -69,7 +74,7 @@ class TaskFocusManager:
     
     def should_send_update(self, new_content: str) -> bool:
         """
-        Determine if we should send an update to Telegram
+        Determine if we should send an update to Telegram (VERY AGGRESSIVE FILTERING)
         
         Args:
             new_content: The new content to potentially send
@@ -78,23 +83,49 @@ class TaskFocusManager:
             True if we should send, False if we should suppress
         """
         current_time = time.time()
+        
+        # CRITICAL: Check if we're rate limited
+        if self.rate_limited and current_time < self.rate_limit_until:
+            remaining = self.rate_limit_until - current_time
+            if self.consecutive_skips % 20 == 0:  # Log every 20th skip
+                logger.warning(f"[TASK-FOCUS] Rate limited - suppressing all updates for {remaining:.1f}s more")
+            self.consecutive_skips += 1
+            return False
+        
+        # Clear rate limit flag if expired
+        if self.rate_limited and current_time >= self.rate_limit_until:
+            logger.info(f"[TASK-FOCUS] Rate limit expired, resuming updates")
+            self.rate_limited = False
+            self.rate_limit_until = 0
+        
         time_since_last = current_time - self.last_update_time
         
-        # Always send if enough time has passed (min_update_interval)
-        if time_since_last >= self.min_update_interval:
-            logger.debug(f"[TASK-FOCUS] Sending update - enough time passed ({time_since_last:.1f}s)")
-            return True
+        # CRITICAL: Only send if enough time has passed (3 minutes minimum)
+        if time_since_last < self.min_update_interval:
+            self.consecutive_skips += 1
+            if self.consecutive_skips % 20 == 0:  # Log every 20th skip
+                logger.debug(f"[TASK-FOCUS] Suppressing update #{self.consecutive_skips} - only {time_since_last:.1f}s since last (need {self.min_update_interval}s)")
+            return False
         
-        # Check if content changed significantly
+        # Check if content changed significantly (1000+ chars)
         if self.last_sent_message:
             content_diff = abs(len(new_content) - len(self.last_sent_message))
-            if content_diff >= self.min_content_change:
-                logger.debug(f"[TASK-FOCUS] Sending update - significant content change ({content_diff} chars)")
-                return True
+            if content_diff < self.min_content_change:
+                self.consecutive_skips += 1
+                if self.consecutive_skips % 20 == 0:
+                    logger.debug(f"[TASK-FOCUS] Suppressing update - content change too small ({content_diff} < {self.min_content_change} chars)")
+                return False
         
-        # Suppress if too soon and no significant change
-        logger.debug(f"[TASK-FOCUS] Suppressing update - too soon ({time_since_last:.1f}s) and no significant change")
-        return False
+        # Reset skip counter if we're sending
+        self.consecutive_skips = 0
+        logger.info(f"[TASK-FOCUS] Allowing update - {time_since_last:.1f}s passed, {abs(len(new_content) - len(self.last_sent_message))} chars changed")
+        return True
+    
+    def mark_rate_limited(self, retry_after: int = 60):
+        """Mark as rate limited and pause updates"""
+        self.rate_limited = True
+        self.rate_limit_until = time.time() + retry_after
+        logger.warning(f"[TASK-FOCUS] Marked as rate limited - pausing updates for {retry_after}s")
     
     def filter_content_for_telegram(self, content: str) -> Optional[str]:
         """

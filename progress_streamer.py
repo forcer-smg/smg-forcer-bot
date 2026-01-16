@@ -112,6 +112,19 @@ class ProgressStreamer:
             # Build progress message
             message = self._build_progress_message()
             
+            # CRITICAL: Check rate limits BEFORE building message
+            chat_id = self.update.effective_chat.id if self.update.effective_chat else None
+            if chat_id:
+                try:
+                    from telegram_rate_limit_manager import get_rate_limit_manager
+                    rate_limit_mgr = get_rate_limit_manager()
+                    if rate_limit_mgr.is_paused(chat_id):
+                        pause_remaining = rate_limit_mgr.get_pause_remaining(chat_id)
+                        logger.warning(f"[PROG-UPDATE] Rate limited - skipping progress update, paused for {pause_remaining:.1f}s")
+                        return False
+                except Exception as e:
+                    logger.warning(f"[PROG-UPDATE] Error checking rate limits: {e}")
+            
             # For progress updates, ALWAYS send new messages instead of editing
             # This avoids 400 errors from rapid edits and is more reliable
             # With 60-second intervals, we should never hit rate limits
