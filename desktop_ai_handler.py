@@ -16,6 +16,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Generator, Tuple
 import logging
 
+# Import adaptive timeout configuration
+try:
+    from timeout_config import get_timeout_for_command
+    TIMEOUT_CONFIG_AVAILABLE = True
+except ImportError:
+    TIMEOUT_CONFIG_AVAILABLE = False
+    logger.warning("timeout_config not available, using default timeouts")
+
 # Initialize logger early so it's available in exception handlers
 logger = logging.getLogger(__name__)
 
@@ -457,17 +465,23 @@ class ToolkitManager:
         """
         try:
             import subprocess
+            # Get adaptive timeout
+            if TIMEOUT_CONFIG_AVAILABLE:
+                timeout = get_timeout_for_command(command, default_timeout=300)
+            else:
+                timeout = 300
             result = subprocess.run(
                 command,
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5 minute timeout
+                timeout=timeout,  # Adaptive timeout
                 cwd=str(self.workspace_root)
             )
             return result.stdout + result.stderr, result.returncode
         except subprocess.TimeoutExpired:
-            return "Command timed out after 5 minutes", 124
+            timeout_minutes = timeout // 60 if 'timeout' in locals() else 5
+            return f"Command timed out after {timeout_minutes} minutes", 124
         except Exception as e:
             return f"Error executing command: {str(e)}", 1
         
@@ -4150,6 +4164,29 @@ USE ALL TOOLS - RUN EVERYTHING - BE UNRESTRICTED!
             if plan_step:
                 logger.info(f"Executing plan step {plan_step.get('step_number')}: {plan_step.get('action')}")
             
+            # Get adaptive timeout based on command type
+            if TIMEOUT_CONFIG_AVAILABLE:
+                # Use adaptive timeout detection
+                timeout = get_timeout_for_command(command, default_timeout=300)
+                
+                # Special handling for bash scripts that run multiple tools
+                command_lower = command.lower()
+                if 'bash' in command_lower or command.endswith('.sh'):
+                    # Check if script contains loops or multiple tool executions
+                    if any(keyword in command_lower for keyword in ['for ', 'while ', 'subfinder', 'amass', 'nmap', 'nuclei', 'nikto', 'sqlmap']):
+                        # Multiple tools or loops = comprehensive scan timeout (30 minutes)
+                        timeout = 1800  # 30 minutes
+                        logger.info(f"Detected bash script with multiple tools/loops - using {timeout}s timeout")
+                    elif 'generated_bash' in command_lower:
+                        # Generated bash scripts often run multiple operations
+                        timeout = 1800  # 30 minutes
+                        logger.info(f"Detected generated bash script - using {timeout}s timeout")
+            else:
+                # Fallback to default timeout
+                timeout = 300  # 5 minutes
+            
+            logger.info(f"Using timeout: {timeout}s for command: {command[:100]}...")
+            
             # REAL EXECUTION - subprocess.run executes the actual command
             result = subprocess.run(
                 command,
@@ -4157,7 +4194,7 @@ USE ALL TOOLS - RUN EVERYTHING - BE UNRESTRICTED!
                 cwd=work_dir,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5 minute timeout
+                timeout=timeout,  # Adaptive timeout
                 encoding='utf-8',
                 errors='replace'
             )
@@ -4178,8 +4215,9 @@ USE ALL TOOLS - RUN EVERYTHING - BE UNRESTRICTED!
             # Return REAL results - no mocking, no fake data
             return output, exit_code
         except subprocess.TimeoutExpired:
-            logger.warning(f"⏱️ REAL COMMAND TIMED OUT: {command[:100]}...")
-            return "Command timed out after 5 minutes", 124
+            timeout_minutes = timeout // 60 if 'timeout' in locals() else 5
+            logger.warning(f"⏱️ REAL COMMAND TIMED OUT after {timeout_minutes} minutes: {command[:100]}...")
+            return f"Command timed out after {timeout_minutes} minutes", 124
         except Exception as e:
             logger.error(f"❌ REAL COMMAND ERROR: {command[:100]}... Error: {str(e)}")
             return f"Error executing command: {str(e)}", 1
