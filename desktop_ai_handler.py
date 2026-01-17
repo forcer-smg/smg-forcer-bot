@@ -2128,13 +2128,27 @@ Example: ["What is the target URL?", "What format should the output be in?"]
         
         try:
             # Check if all plan steps executed
+            # IMPROVED: More lenient step counting - if plan is too granular, use execution count
             if plan:
                 steps = plan.get('steps', [])
-                executed_commands = [r for r in execution_results if '✅' in r or 'Executed' in r]
-                completion_status['all_steps_done'] = len(executed_commands) >= len(steps)
+                executed_commands = [r for r in execution_results if '✅' in r or 'Executed' in r or '🔄 Executed' in r]
+                
+                # If plan has too many steps (>20) and we have substantial execution, be more lenient
+                # Consider steps done if we've executed at least 30% of steps OR have 10+ executions
+                if len(steps) > 20:
+                    execution_ratio = len(executed_commands) / len(steps) if len(steps) > 0 else 0
+                    if execution_ratio >= 0.3 or len(executed_commands) >= 10:
+                        # Plan is too granular, but we've executed substantial work
+                        completion_status['all_steps_done'] = True
+                        logger.info(f"Plan has {len(steps)} steps (too granular), but {len(executed_commands)} commands executed ({execution_ratio:.1%}) - marking steps as done")
+                    else:
+                        completion_status['all_steps_done'] = len(executed_commands) >= len(steps)
+                else:
+                    # Normal step counting for smaller plans
+                    completion_status['all_steps_done'] = len(executed_commands) >= len(steps)
                 
                 if not completion_status['all_steps_done']:
-                    # Find remaining steps
+                    # Find remaining steps - but limit to reasonable number
                     executed_step_numbers = set()
                     for result in executed_commands:
                         # Try to extract step number from result
@@ -2142,9 +2156,16 @@ Example: ["What is the target URL?", "What format should the output be in?"]
                         if step_match:
                             executed_step_numbers.add(int(step_match.group(1)))
                     
+                    # Only show first 10 remaining steps to avoid overwhelming
+                    remaining_count = 0
                     for i, step in enumerate(steps, 1):
                         if i not in executed_step_numbers:
-                            completion_status['remaining_steps'].append(step.get('action', f'Step {i}'))
+                            if remaining_count < 10:
+                                completion_status['remaining_steps'].append(step.get('action', f'Step {i}'))
+                            remaining_count += 1
+                    
+                    if remaining_count > 10:
+                        completion_status['remaining_steps'].append(f"... and {remaining_count - 10} more steps")
             
             # Check if code was executed
             completion_status['code_executed'] = any('Executed' in r for r in execution_results)
@@ -2211,22 +2232,43 @@ Return JSON only: {{"is_complete": true/false, "status": "complete/incomplete/ne
         }
         
         # Check all steps
+        # IMPROVED: More lenient step counting - if plan is too granular, use execution count
         if plan:
             steps = plan.get('steps', [])
-            executed_commands = [r for r in execution_results if '✅' in r or 'Executed' in r]
-            completion['all_steps_done'] = len(executed_commands) >= len(steps)
+            executed_commands = [r for r in execution_results if '✅' in r or 'Executed' in r or '🔄 Executed' in r]
+            
+            # If plan has too many steps (>20) and we have substantial execution, be more lenient
+            # Consider steps done if we've executed at least 30% of steps OR have 10+ executions
+            if len(steps) > 20:
+                execution_ratio = len(executed_commands) / len(steps) if len(steps) > 0 else 0
+                if execution_ratio >= 0.3 or len(executed_commands) >= 10:
+                    # Plan is too granular, but we've executed substantial work
+                    completion['all_steps_done'] = True
+                    logger.info(f"Plan has {len(steps)} steps (too granular), but {len(executed_commands)} commands executed ({execution_ratio:.1%}) - marking steps as done")
+                else:
+                    completion['all_steps_done'] = len(executed_commands) >= len(steps)
+            else:
+                # Normal step counting for smaller plans
+                completion['all_steps_done'] = len(executed_commands) >= len(steps)
             
             if not completion['all_steps_done']:
-                # Find remaining steps
+                # Find remaining steps - but limit to reasonable number
                 executed_step_numbers = set()
                 for result in executed_commands:
                     step_match = re.search(r'step\s*(\d+)', result.lower())
                     if step_match:
                         executed_step_numbers.add(int(step_match.group(1)))
                 
+                # Only show first 10 remaining steps to avoid overwhelming
+                remaining_count = 0
                 for i, step in enumerate(steps, 1):
                     if i not in executed_step_numbers:
-                        completion['remaining_steps'].append(step.get('action', f'Step {i}'))
+                        if remaining_count < 10:
+                            completion['remaining_steps'].append(step.get('action', f'Step {i}'))
+                        remaining_count += 1
+                
+                if remaining_count > 10:
+                    completion['remaining_steps'].append(f"... and {remaining_count - 10} more steps")
         
         # Check summary
         completion['summary_generated'] = (
@@ -2271,22 +2313,29 @@ Return JSON only: {{"is_complete": true/false, "status": "complete/incomplete/ne
             )
         
         # IMPROVED: More flexible completion criteria
-        # For code generation: files exist + code is valid = complete
-        # For other tasks: all steps + results = complete
+        # For code generation: files exist + code is valid = complete (summary can be auto-generated)
+        # For other tasks: files + results OR all steps + results = complete
         if is_code_generation:
+            # Code generation: files + execution + results = complete (summary optional, will be auto-generated)
             completion['is_complete'] = (
                 completion['files_sent'] and
                 completion['results_valid'] and
                 (completion['all_steps_done'] or len(generated_files) > 0)  # Steps done OR files generated
             )
+            # Auto-mark summary as generated if we have files and results (will generate it later)
+            if completion['is_complete'] and not completion['summary_generated']:
+                completion['summary_generated'] = True  # Will be generated automatically
         else:
-            # Overall completion - ALL conditions must be met for non-code tasks
-            completion['is_complete'] = (
-                completion['all_steps_done'] and
-                completion['summary_generated'] and
-                completion['files_sent'] and
-                completion['results_valid']
-            )
+            # For non-code tasks: files + results OR all steps + results = complete
+            # Summary can be auto-generated if missing
+            has_files_and_results = completion['files_sent'] and completion['results_valid']
+            has_all_steps = completion['all_steps_done'] and completion['results_valid']
+            
+            completion['is_complete'] = has_files_and_results or has_all_steps
+            
+            # Auto-mark summary as generated if task is complete (will generate it automatically)
+            if completion['is_complete'] and not completion['summary_generated']:
+                completion['summary_generated'] = True  # Will be generated automatically
         
         # Set status
         if completion['is_complete']:
@@ -2848,7 +2897,12 @@ Return JSON only: {{"is_complete": true/false, "status": "complete/incomplete/ne
                 if completion_check.get('remaining_steps'):
                     remaining_count = len(completion_check.get('remaining_steps', []))
                     # If remaining steps haven't decreased in last 2 iterations, consider re-planning
-                    if hasattr(context, 'user_data'):
+                    # BUT: Don't re-plan if we have files and results (task is functionally complete)
+                    has_files_and_results = completion_check.get('files_sent', False) and completion_check.get('results_valid', False)
+                    if has_files_and_results:
+                        logger.info("Task has files and results - skipping re-planning even if steps remain")
+                        should_replan = False
+                    elif hasattr(context, 'user_data'):
                         prev_remaining = context.user_data.get('prev_remaining_steps_count', None)
                         if prev_remaining is not None and remaining_count >= prev_remaining:
                             should_replan = True
@@ -2895,28 +2949,53 @@ Return a new execution plan with specific, actionable steps.
                 except Exception as e:
                     logger.error(f"Error during re-planning: {e}", exc_info=True)
             
-            # Only stop when ALL conditions are met
+            # Only stop when task is functionally complete
             if completion_check['is_complete']:
-                # For code generation tasks, if files exist and are valid, consider it complete
-                is_code_generation = any(kw in message.lower() for kw in ['generate', 'create', 'code', 'script', 'checker'])
-                if is_code_generation and completion_check.get('files_sent', False) and completion_check.get('results_valid', False):
+                # For code generation/exploitation tasks, if files exist and are valid, consider it complete
+                is_code_generation = any(kw in message.lower() for kw in ['generate', 'create', 'code', 'script', 'checker', 'exploit'])
+                has_files_and_results = completion_check.get('files_sent', False) and completion_check.get('results_valid', False)
+                
+                if is_code_generation and has_files_and_results:
                     logger.info(f"Code generation task complete: files sent and valid after {iteration} iterations")
+                    # Auto-generate summary before breaking
+                    if not completion_check.get('summary_generated', False):
+                        try:
+                            summary_text, summary_file_path = await self.generate_task_summary(
+                                message, full_response, plan, execution_results, generated_files, task_id, process_start_time
+                            )
+                            if summary_file_path:
+                                generated_files.append(summary_file_path)
+                            completion_check['summary_generated'] = True
+                            logger.info("Auto-generated summary for code generation task")
+                        except Exception as e:
+                            logger.warning(f"Error auto-generating summary: {e}")
                     break
-                elif (completion_check.get('all_steps_done', False) and 
-                      completion_check.get('summary_generated', False) and 
-                      completion_check.get('files_sent', False)):
-                    logger.info(f"Task truly complete after {iteration} continuation iterations")
+                elif has_files_and_results or (completion_check.get('all_steps_done', False) and completion_check.get('results_valid', False)):
+                    # Task is functionally complete - files + results OR steps + results
+                    logger.info(f"Task functionally complete after {iteration} iterations: files={completion_check.get('files_sent')}, results={completion_check.get('results_valid')}, steps={completion_check.get('all_steps_done')}")
+                    # Auto-generate summary if missing
+                    if not completion_check.get('summary_generated', False):
+                        try:
+                            summary_text, summary_file_path = await self.generate_task_summary(
+                                message, full_response, plan, execution_results, generated_files, task_id, process_start_time
+                            )
+                            if summary_file_path:
+                                generated_files.append(summary_file_path)
+                            completion_check['summary_generated'] = True
+                            logger.info("Auto-generated summary for completed task")
+                        except Exception as e:
+                            logger.warning(f"Error auto-generating summary: {e}")
                     break
                 else:
                     logger.info(f"Task marked complete but missing requirements: "
                               f"steps_done={completion_check.get('all_steps_done')}, "
                               f"summary={completion_check.get('summary_generated')}, "
-                              f"files={completion_check.get('files_sent')}")
-                    # For code generation, if files are sent, we can stop even without summary
-                    if is_code_generation and completion_check.get('files_sent', False):
-                        logger.info(f"Code generation complete: files sent (summary optional)")
+                              f"files={completion_check.get('files_sent')}, "
+                              f"results={completion_check.get('results_valid')}")
+                    # If we have files and results, we're done (summary will be auto-generated)
+                    if has_files_and_results:
+                        logger.info(f"Task complete: files and results present (summary will be auto-generated)")
                         break
-                    # Continue to ensure all requirements are met
             
             # Auto-query: "What's the next step? What still needs to be done?"
             remaining_steps_text = "\n".join(completion_check.get('remaining_steps', [])) if completion_check.get('remaining_steps') else "Continue working on the original task"
