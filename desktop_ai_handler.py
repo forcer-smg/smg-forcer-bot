@@ -2360,30 +2360,49 @@ Return JSON only: {{"is_complete": true/false, "status": "complete/incomplete/ne
                 any(len(r) > 50 for r in execution_results)  # Meaningful results
             )
         
+        # CRITICAL: Check for errors in execution_results - if errors exist, task is NOT complete
+        has_errors = any(
+            '❌ ERROR' in r or 
+            '⏱️ TIMEOUT' in r or 
+            'ERROR:' in r or 
+            'Error:' in r or
+            'exit code 1' in r.lower() or
+            'exit code 128' in r.lower() or
+            (exit_code_match := re.search(r'exit code (\d+)', r.lower())) and int(exit_code_match.group(1)) != 0
+            for r in execution_results
+        )
+        
+        if has_errors:
+            completion['has_errors'] = True
+            completion['is_complete'] = False  # NEVER mark complete if there are errors
+            logger.warning(f"Completion check: ERRORS DETECTED in execution_results - task NOT complete, will trigger correction")
+        
         # IMPROVED: More flexible completion criteria
         # For code generation: files exist + code is valid = complete (summary can be auto-generated)
         # For other tasks: files + results OR all steps + results = complete
-        if is_code_generation:
-            # Code generation: files + execution + results = complete (summary optional, will be auto-generated)
-            completion['is_complete'] = (
-                completion['files_sent'] and
-                completion['results_valid'] and
-                (completion['all_steps_done'] or len(generated_files) > 0)  # Steps done OR files generated
-            )
-            # Auto-mark summary as generated if we have files and results (will generate it later)
-            if completion['is_complete'] and not completion['summary_generated']:
-                completion['summary_generated'] = True  # Will be generated automatically
-        else:
-            # For non-code tasks: files + results OR all steps + results = complete
-            # Summary can be auto-generated if missing
-            has_files_and_results = completion['files_sent'] and completion['results_valid']
-            has_all_steps = completion['all_steps_done'] and completion['results_valid']
-            
-            completion['is_complete'] = has_files_and_results or has_all_steps
-            
-            # Auto-mark summary as generated if task is complete (will generate it automatically)
-            if completion['is_complete'] and not completion['summary_generated']:
-                completion['summary_generated'] = True  # Will be generated automatically
+        # BUT ONLY if no errors
+        if not has_errors:
+            if is_code_generation:
+                # Code generation: files + execution + results = complete (summary optional, will be auto-generated)
+                completion['is_complete'] = (
+                    completion['files_sent'] and
+                    completion['results_valid'] and
+                    (completion['all_steps_done'] or len(generated_files) > 0)  # Steps done OR files generated
+                )
+                # Auto-mark summary as generated if we have files and results (will generate it later)
+                if completion['is_complete'] and not completion['summary_generated']:
+                    completion['summary_generated'] = True  # Will be generated automatically
+            else:
+                # For non-code tasks: files + results OR all steps + results = complete
+                # Summary can be auto-generated if missing
+                has_files_and_results = completion['files_sent'] and completion['results_valid']
+                has_all_steps = completion['all_steps_done'] and completion['results_valid']
+                
+                completion['is_complete'] = has_files_and_results or has_all_steps
+                
+                # Auto-mark summary as generated if task is complete (will generate it automatically)
+                if completion['is_complete'] and not completion['summary_generated']:
+                    completion['summary_generated'] = True  # Will be generated automatically
         
         # Set status
         if completion['is_complete']:
