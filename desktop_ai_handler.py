@@ -9949,16 +9949,31 @@ Continue your response now:
                                           '.vb', '.ps1', '.psm1', '.bat', '.cmd', '.ini', '.conf', 
                                           '.config', '.env', '.properties', '.toml', '.lock'}
                     
-                    code_files = [f for f in generated_file_paths 
-                                 if Path(f).suffix.lower() in code_file_extensions]
+                    # Separate code files and documentation files
+                    code_files = []
+                    doc_files = []
+                    for f in generated_file_paths:
+                        ext = Path(f).suffix.lower()
+                        filename = Path(f).name.lower()
+                        if ext in code_file_extensions:
+                            code_files.append(f)
+                        elif ext == '.md':
+                            # Include important markdown files (documentation, summaries, guides)
+                            if any(keyword in filename for keyword in [
+                                'readme', 'summary', 'guide', 'documentation', 'report', 
+                                'analysis', 'overview', 'instructions', 'setup', 'plan'
+                            ]):
+                                doc_files.append(f)
                     
-                    if code_files:
-                        logger.info(f"Sending {len(code_files)} code file(s) to user {user_id} (skipping {len(generated_file_paths) - len(code_files)} .md/doc files)")
+                    all_files_to_send = code_files + doc_files
+                    
+                    if all_files_to_send:
+                        logger.info(f"Sending {len(code_files)} code file(s) and {len(doc_files)} documentation file(s) to user {user_id} (skipping {len(generated_file_paths) - len(all_files_to_send)} other files)")
                         from telegram import InputFile
                         from file_generator import is_file_size_valid, MAX_FILE_SIZE
                         
                         files_sent_count = 0
-                        for file_path in code_files:
+                        for file_path in all_files_to_send:
                             if not file_path or not Path(file_path).exists():
                                 logger.warning(f"File does not exist: {file_path}")
                                 continue
@@ -9973,7 +9988,7 @@ Continue your response now:
                                             caption=f"📄 **Generated File:** `{Path(file_path).name}`",
                                             reply_markup=file_keyboard
                                         )
-                                    logger.info(f"✅ Sent generated code file: {Path(file_path).name}")
+                                    logger.info(f"✅ Sent generated file: {Path(file_path).name}")
                                     files_sent_count += 1
                                 except Exception as e:
                                     logger.error(f"Failed to send file {file_path}: {e}")
@@ -9987,16 +10002,20 @@ Continue your response now:
                                     reply_markup=file_keyboard
                                 )
                         
-                        # Mark files as sent if at least one code file was sent
+                        # Mark files as sent if at least one file was sent
                         if files_sent_count > 0:
                             files_sent_successfully = True
                             if hasattr(context, 'user_data'):
                                 context.user_data['files_sent'] = True
-                            logger.info(f"✅ Successfully sent {files_sent_count} code file(s) to user {user_id}")
+                            logger.info(f"✅ Successfully sent {files_sent_count} file(s) ({len(code_files)} code, {len(doc_files)} docs) to user {user_id}")
                         else:
-                            logger.info(f"⚠️ No code files were sent (all files were .md/doc files or failed to send)")
+                            logger.info(f"⚠️ No files were sent (all files failed to send)")
                     else:
-                        logger.info(f"⚠️ No code files to send (all {len(generated_file_paths)} files were .md/doc files)")
+                        skipped_count = len(generated_file_paths) - len(all_files_to_send)
+                        if skipped_count > 0:
+                            logger.info(f"⚠️ No files to send (all {len(generated_file_paths)} files were filtered out or non-essential)")
+                        else:
+                            logger.info(f"⚠️ No files to send")
                 except Exception as e:
                     logger.error(f"Error sending generated files: {e}", exc_info=True)
             
@@ -11763,16 +11782,31 @@ Continue your response now:
                                           '.vb', '.ps1', '.psm1', '.bat', '.cmd', '.ini', '.conf', 
                                           '.config', '.env', '.properties', '.toml', '.lock'}
                     
-                    code_files = [f for f in generated_file_paths 
-                                 if Path(f).suffix.lower() in code_file_extensions]
+                    # Separate code files and documentation files
+                    code_files = []
+                    doc_files = []
+                    for f in generated_file_paths:
+                        ext = Path(f).suffix.lower()
+                        filename = Path(f).name.lower()
+                        if ext in code_file_extensions:
+                            code_files.append(f)
+                        elif ext == '.md':
+                            # Include important markdown files (documentation, summaries, guides)
+                            if any(keyword in filename for keyword in [
+                                'readme', 'summary', 'guide', 'documentation', 'report', 
+                                'analysis', 'overview', 'instructions', 'setup', 'plan'
+                            ]):
+                                doc_files.append(f)
                     
-                    if code_files:
-                        logger.info(f"Sending {len(code_files)} code file(s) to user {user_id} (skipping {len(generated_file_paths) - len(code_files)} .md/doc files)")
+                    all_files_to_send = code_files + doc_files
+                    
+                    if all_files_to_send:
+                        logger.info(f"Sending {len(code_files)} code file(s) and {len(doc_files)} documentation file(s) to user {user_id} (skipping {len(generated_file_paths) - len(all_files_to_send)} other files)")
                         from telegram import InputFile
                         from file_generator import is_file_size_valid, MAX_FILE_SIZE
                         
                         files_sent_count = 0
-                        for file_path in code_files:
+                        for file_path in all_files_to_send:
                             if not file_path or not Path(file_path).exists():
                                 logger.warning(f"File does not exist: {file_path}")
                                 continue
@@ -11787,7 +11821,7 @@ Continue your response now:
                                             caption=f"📄 **Generated File:** `{Path(file_path).name}`",
                                             reply_markup=file_keyboard
                                         )
-                                    logger.info(f"✅ Sent generated code file: {Path(file_path).name}")
+                                    logger.info(f"✅ Sent generated file: {Path(file_path).name}")
                                     files_sent_count += 1
                                 except Exception as e:
                                     logger.error(f"Failed to send file {file_path}: {e}")
@@ -11801,16 +11835,20 @@ Continue your response now:
                                     reply_markup=file_keyboard
                                 )
                         
-                        # Mark files as sent if at least one code file was sent
+                        # Mark files as sent if at least one file was sent
                         if files_sent_count > 0:
                             files_sent_successfully = True
                             if hasattr(context, 'user_data'):
                                 context.user_data['files_sent'] = True
-                            logger.info(f"✅ Successfully sent {files_sent_count} code file(s) to user {user_id}")
+                            logger.info(f"✅ Successfully sent {files_sent_count} file(s) ({len(code_files)} code, {len(doc_files)} docs) to user {user_id}")
                         else:
-                            logger.info(f"⚠️ No code files were sent (all files were .md/doc files or failed to send)")
+                            logger.info(f"⚠️ No files were sent (all files failed to send)")
                     else:
-                        logger.info(f"⚠️ No code files to send (all {len(generated_file_paths)} files were .md/doc files)")
+                        skipped_count = len(generated_file_paths) - len(all_files_to_send)
+                        if skipped_count > 0:
+                            logger.info(f"⚠️ No files to send (all {len(generated_file_paths)} files were filtered out or non-essential)")
+                        else:
+                            logger.info(f"⚠️ No files to send")
                 except Exception as e:
                     logger.error(f"Error sending generated files: {e}", exc_info=True)
             
