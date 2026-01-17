@@ -338,15 +338,20 @@ class CodeReviewer:
         fixes = []
         
         for error in errors:
-            if 'SyntaxError' in error or 'syntax error' in error.lower():
+            # Skip None or empty errors
+            if not error or not isinstance(error, str):
+                continue
+            
+            error_lower = error.lower()
+            if 'SyntaxError' in error or 'syntax error' in error_lower:
                 # Common syntax fixes
                 if 'unexpected EOF' in error or 'unexpected end of file' in error:
                     fixes.append("Check for missing closing brackets, parentheses, or quotes")
-                elif 'invalid syntax' in error.lower():
+                elif 'invalid syntax' in error_lower:
                     fixes.append("Review syntax around the error location")
-                elif 'indentation' in error.lower():
+                elif 'indentation' in error_lower:
                     fixes.append("Check indentation - Python requires consistent indentation")
-                elif 'unexpected indent' in error.lower():
+                elif 'unexpected indent' in error_lower:
                     fixes.append("Remove unexpected indentation or add missing code")
                 else:
                     fixes.append(f"Fix syntax error: {error}")
