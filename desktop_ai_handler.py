@@ -3159,14 +3159,33 @@ If you see errors, fix them. If dependencies are missing, install them. Then con
                     )
                     next_response = ""  # Clear response if timed out
                 
-                # Only add continuation if we got a response
-                if next_response and next_response.strip():
+                # Only add continuation if we got a meaningful response
+                if next_response and len(next_response.strip()) >= 50:
                     full_response += "\n\n---\n\n**Continuation:**\n\n" + next_response
                 else:
-                    # If no response (timeout or empty), log and continue
-                    logger.warning(f"Iteration {iteration} produced empty response, continuing to next iteration")
-                    if not next_response:
-                        # Add a note that we're continuing
+                    # If no response or very short response, check if we have errors to fix
+                    logger.warning(f"Iteration {iteration} produced empty/short response (len={len(next_response) if next_response else 0})")
+                    
+                    # Check for errors that need fixing
+                    errors_in_results = [r for r in execution_results if '❌ ERROR' in r or '⏱️ TIMEOUT' in r or 'ERROR:' in r or 'exit code' in r.lower()]
+                    
+                    if errors_in_results and (not next_response or len(next_response.strip()) < 50):
+                        # Generate explicit error fix prompt
+                        explicit_fix = "**🚨 ERRORS DETECTED - FIX REQUIRED:**\n\n"
+                        for i, error in enumerate(errors_in_results[:3], 1):
+                            error_preview = error[:800] + "..." if len(error) > 800 else error
+                            explicit_fix += f"**Error {i}:**\n{error_preview}\n\n"
+                        
+                        # Add specific fix instructions based on error types
+                        if any('ModuleNotFoundError' in e or 'No module named' in e for e in errors_in_results):
+                            explicit_fix += "**FIX:** Install missing Python modules:\n```bash\npip install pandas aiohttp\n```\n\n"
+                        if any('git clone' in e.lower() and 'fatal' in e.lower() for e in errors_in_results):
+                            explicit_fix += "**FIX:** Git clone failed. Skip RedTeam-Tools or use alternative method.\n\n"
+                        
+                        explicit_fix += "**ACTION:** Provide corrected commands to fix the errors above, then continue with the task.\n"
+                        full_response += "\n\n---\n\n" + explicit_fix
+                    elif not next_response:
+                        # No errors but empty response - add continuation note
                         full_response += "\n\n---\n\n**Note:** Continuing to next iteration..."
                 
                 # Check for new commands to execute
