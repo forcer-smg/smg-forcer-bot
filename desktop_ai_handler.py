@@ -50,6 +50,13 @@ except ImportError:
     logger.warning("vision_processor not available")
 
 try:
+    from rag_system import RAGSystem
+    RAG_SYSTEM_AVAILABLE = True
+except ImportError:
+    RAG_SYSTEM_AVAILABLE = False
+    logger.warning("rag_system not available")
+
+try:
     from background_processor import get_background_processor, ResponseFormatter
     BACKGROUND_PROCESSOR_AVAILABLE = True
 except ImportError:
@@ -3163,15 +3170,26 @@ Remaining steps: {remaining_steps_text}
 If you see errors, fix them. If dependencies are missing, install them. Then continue with the task.
 """
             
-            # Send status update
-            effective_max_display = max_iterations if max_iterations is not None else "∞"
-            await update.message.reply_text(
-                f"🔄 **Continuing task...** (iteration {iteration + 1}/{effective_max_display})\n\n"
-                f"Status: {completion_check['status']}\n"
-                f"Remaining: {len(completion_check.get('remaining_steps', []))} steps\n"
-                f"Time elapsed: {total_time/60:.1f} minutes",
-                parse_mode='Markdown'
+            # Send status update (only if we have meaningful progress or errors to fix)
+            # Don't send empty status updates
+            has_errors_to_fix = len(critical_errors) > 0 if 'critical_errors' in locals() else False
+            has_meaningful_progress = (
+                len(execution_results) > 0 or 
+                len(completion_check.get('remaining_steps', [])) > 0 or
+                has_errors_to_fix
             )
+            
+            if has_meaningful_progress:
+                effective_max_display = max_iterations if max_iterations is not None else "∞"
+                await update.message.reply_text(
+                    f"🔄 **Continuing task...** (iteration {iteration + 1}/{effective_max_display})\n\n"
+                    f"Status: {completion_check['status']}\n"
+                    f"Remaining: {len(completion_check.get('remaining_steps', []))} steps\n"
+                    f"Time elapsed: {total_time/60:.1f} minutes",
+                    parse_mode='Markdown'
+                )
+            else:
+                logger.info(f"Skipping status update - no meaningful progress (iteration {iteration + 1})")
             
             # Get next step response (but don't recurse into full handle_with_streaming)
             # Instead, use a simpler internal method
@@ -3220,18 +3238,39 @@ If you see errors, fix them. If dependencies are missing, install them. Then con
                     )
                     next_response = ""  # Clear response if timed out
                 
-                # Only add continuation if we got a meaningful response
+                # CRITICAL: Only add continuation if we got a meaningful response
+                # If response is empty, don't send any messages and break the loop
                 if next_response and len(next_response.strip()) >= 50:
                     full_response += "\n\n---\n\n**Continuation:**\n\n" + next_response
                 else:
                     # If no response or very short response, check if we have errors to fix
-                    logger.warning(f"Iteration {iteration} produced empty/short response (len={len(next_response) if next_response else 0})")
+                    response_len = len(next_response.strip()) if next_response else 0
+                    logger.warning(f"Iteration {iteration} produced empty/short response (len={response_len})")
+                    
+                    # Track consecutive empty responses
+                    if not hasattr(self, '_consecutive_empty_responses'):
+                        self._consecutive_empty_responses = 0
+                    
+                    if response_len < 50:
+                        self._consecutive_empty_responses += 1
+                    else:
+                        self._consecutive_empty_responses = 0
+                    
+                    # If we get 3+ consecutive empty responses, break the loop
+                    if self._consecutive_empty_responses >= 3:
+                        logger.error(f"Breaking loop: {self._consecutive_empty_responses} consecutive empty responses")
+                        await update.message.reply_text(
+                            f"⚠️ **Stopping task** - No meaningful response after {self._consecutive_empty_responses} attempts.\n\n"
+                            f"Task may be complete or needs manual intervention.",
+                            parse_mode='Markdown'
+                        )
+                        break
                     
                     # Check for errors that need fixing
                     errors_in_results = [r for r in execution_results if '❌ ERROR' in r or '⏱️ TIMEOUT' in r or 'ERROR:' in r or 'exit code' in r.lower()]
                     
                     if errors_in_results and (not next_response or len(next_response.strip()) < 50):
-                        # Generate explicit error fix prompt
+                        # Generate explicit error fix prompt (but don't send empty message)
                         explicit_fix = "**🚨 ERRORS DETECTED - FIX REQUIRED:**\n\n"
                         for i, error in enumerate(errors_in_results[:3], 1):
                             error_preview = error[:800] + "..." if len(error) > 800 else error
@@ -3242,18 +3281,22 @@ If you see errors, fix them. If dependencies are missing, install them. Then con
                             explicit_fix += "**FIX:** Install missing Python modules:\n```bash\npip install pandas aiohttp\n```\n\n"
                         if any('git clone' in e.lower() and 'fatal' in e.lower() for e in errors_in_results):
                             explicit_fix += "**FIX:** Git clone failed. Skip RedTeam-Tools or use alternative method.\n\n"
+                        if any('libpcre3-dev' in e.lower() or 'has no installation candidate' in e.lower() for e in errors_in_results):
+                            explicit_fix += "**FIX:** Package not available. Try alternative: `apt-get install libpcre2-dev` or `libpcre-dev`\n\n"
                         
                         explicit_fix += "**ACTION:** Provide corrected commands to fix the errors above, then continue with the task.\n"
                         full_response += "\n\n---\n\n" + explicit_fix
-                    elif not next_response:
-                        # No errors but empty response - add continuation note
-                        full_response += "\n\n---\n\n**Note:** Continuing to next iteration..."
+                    # Don't add continuation note for empty responses - just continue silently
                 
-                # Check for new commands to execute
-                command_pattern = re.compile(r'```(?:bash|sh|python|cmd|powershell)?\s*\n(.*?)\n```', re.DOTALL | re.IGNORECASE)
-                new_commands = command_pattern.findall(next_response)
+                # Check for new commands to execute (only if we have a response)
+                new_commands = []
+                if next_response and len(next_response.strip()) >= 50:
+                    command_pattern = re.compile(r'```(?:bash|sh|python|cmd|powershell)?\s*\n(.*?)\n```', re.DOTALL | re.IGNORECASE)
+                    new_commands = command_pattern.findall(next_response)
+                else:
+                    logger.info(f"No commands to execute - response was empty or too short (len={len(next_response.strip()) if next_response else 0})")
                 
-                # Execute new commands
+                # Execute new commands (only if we have any)
                 step_counter = 0
                 for cmd in new_commands:
                     if cmd.strip():
