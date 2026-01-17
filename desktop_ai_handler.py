@@ -2361,27 +2361,41 @@ Return JSON only: {{"is_complete": true/false, "status": "complete/incomplete/ne
             )
         
         # CRITICAL: Check for errors in execution_results - if errors exist, task is NOT complete
-        has_errors = any(
-            '❌ ERROR' in r or 
-            '⏱️ TIMEOUT' in r or 
-            'ERROR:' in r or 
-            'Error:' in r or
-            'exit code 1' in r.lower() or
-            'exit code 128' in r.lower() or
-            (exit_code_match := re.search(r'exit code (\d+)', r.lower())) and int(exit_code_match.group(1)) != 0
-            for r in execution_results
-        )
+        # But allow completion if errors are minor/warnings (like GOOGLE_API_KEY warnings)
+        critical_errors = []
+        minor_warnings = []
         
-        if has_errors:
+        for r in execution_results:
+            r_lower = r.lower()
+            # Check for critical errors
+            if ('❌ ERROR' in r or 
+                '⏱️ TIMEOUT' in r or 
+                'ERROR:' in r or 
+                'Error:' in r or
+                'exit code 1' in r_lower or
+                'exit code 128' in r_lower or
+                (exit_code_match := re.search(r'exit code (\d+)', r_lower)) and int(exit_code_match.group(1)) != 0):
+                # Check if it's a minor warning (like GOOGLE_API_KEY) vs critical error
+                if 'google_api_key' in r_lower or ('env variable' in r_lower and 'warning' in r_lower):
+                    minor_warnings.append(r)
+                else:
+                    critical_errors.append(r)
+        
+        has_critical_errors = len(critical_errors) > 0
+        
+        if has_critical_errors:
             completion['has_errors'] = True
-            completion['is_complete'] = False  # NEVER mark complete if there are errors
-            logger.warning(f"Completion check: ERRORS DETECTED in execution_results - task NOT complete, will trigger correction")
+            completion['critical_errors'] = critical_errors
+            completion['is_complete'] = False  # NEVER mark complete if there are critical errors
+            logger.warning(f"Completion check: {len(critical_errors)} CRITICAL ERRORS DETECTED - task NOT complete, will trigger correction")
+        elif minor_warnings:
+            logger.info(f"Completion check: {len(minor_warnings)} minor warnings (not blocking completion)")
         
         # IMPROVED: More flexible completion criteria
         # For code generation: files exist + code is valid = complete (summary can be auto-generated)
         # For other tasks: files + results OR all steps + results = complete
-        # BUT ONLY if no errors
-        if not has_errors:
+        # BUT ONLY if no critical errors
+        if not has_critical_errors:
             if is_code_generation:
                 # Code generation: files + execution + results = complete (summary optional, will be auto-generated)
                 completion['is_complete'] = (
@@ -2404,11 +2418,22 @@ Return JSON only: {{"is_complete": true/false, "status": "complete/incomplete/ne
                 if completion['is_complete'] and not completion['summary_generated']:
                     completion['summary_generated'] = True  # Will be generated automatically
         
-        # Set status
-        if completion['is_complete']:
+        # IMPROVED: Better status determination
+        # If we have files + results + no critical errors, we're essentially complete
+        # Summary can be auto-generated
+        if completion.get('files_sent') and completion.get('results_valid') and not has_critical_errors:
+            # We have working files and results - task is functionally complete
+            if not completion.get('summary_generated'):
+                completion['status'] = 'needs_summary'  # Just needs summary
+            else:
+                completion['status'] = 'complete'
+                completion['is_complete'] = True
+        elif completion['is_complete']:
             completion['status'] = 'complete'
-        elif completion['all_steps_done']:
+        elif completion['all_steps_done'] and not has_critical_errors:
             completion['status'] = 'needs_summary_files'
+        elif has_critical_errors:
+            completion['status'] = 'has_errors'  # Explicit error status
         else:
             completion['status'] = 'incomplete'
         
@@ -2812,7 +2837,7 @@ Return JSON only: {{"is_complete": true/false, "status": "complete/incomplete/ne
         MAX_SAFE_ITERATIONS = 50
         # Increased timeout for complex tasks (code generation, exploitation, comprehensive scans)
         # Allow more time for tasks to complete and generate results with summaries
-        PER_ITERATION_TIMEOUT = 600  # 10 minutes per iteration (increased from 5 minutes)
+        PER_ITERATION_TIMEOUT = 900  # 15 minutes per iteration (increased for long-running scans that wait for results)
         TOTAL_TIME_WARNING = 3600  # 60 minutes total (increased from 30 minutes)
         
         full_response = initial_response
@@ -2820,6 +2845,10 @@ Return JSON only: {{"is_complete": true/false, "status": "complete/incomplete/ne
         safety_iteration = 0
         start_time = time.time()
         generated_files = []  # Track generated files for Phase 2
+        
+        # Track executed commands to prevent infinite loops
+        executed_commands_history = []  # List of (command_hash, iteration) tuples
+        recent_command_hashes = set()  # Last 10 command hashes to detect duplicates
         
         # Build context for continuation
         continuation_context_parts = [
@@ -3068,20 +3097,52 @@ Return a new execution plan with specific, actionable steps.
             remaining_steps_text = "\n".join(completion_check.get('remaining_steps', [])) if completion_check.get('remaining_steps') else "Continue working on the original task"
             
             # Check for errors and include them explicitly in the query
-            errors_in_results = [r for r in execution_results if '❌ ERROR' in r or '⏱️ TIMEOUT' in r or 'ERROR:' in r or 'exit code' in r.lower()]
+            # Separate critical errors from minor warnings
+            critical_errors = []
+            minor_warnings = []
+            for r in execution_results:
+                r_lower = r.lower()
+                if ('❌ ERROR' in r or '⏱️ TIMEOUT' in r or 'ERROR:' in r or 
+                    'exit code 1' in r_lower or 'exit code 128' in r_lower or
+                    (exit_match := re.search(r'exit code (\d+)', r_lower)) and int(exit_match.group(1)) != 0):
+                    # Check if it's minor (like GOOGLE_API_KEY warning) vs critical
+                    if 'google_api_key' in r_lower or ('env variable' in r_lower and 'warning' in r_lower):
+                        minor_warnings.append(r)
+                    else:
+                        critical_errors.append(r)
+            
             error_section = ""
-            if errors_in_results:
+            if critical_errors:
                 error_section = "\n\n🚨 **CRITICAL ERRORS DETECTED - YOU MUST FIX THESE NOW:**\n"
-                for i, error in enumerate(errors_in_results[:5], 1):  # Include up to 5 errors
+                for i, error in enumerate(critical_errors[:5], 1):  # Include up to 5 critical errors
                     error_section += f"\n**ERROR {i}:**\n{error[:2000]}\n"
+                    
+                    # Add specific fix suggestions based on error content
+                    error_lower = error.lower()
+                    if 'httpx' in error_lower and ('-s' in error_lower or 'no such option' in error_lower):
+                        error_section += "**FIX:** httpx doesn't support `-s` flag. Use `-silent` or remove the flag.\n"
+                    if 'can\'t open file' in error_lower or 'no such file' in error_lower:
+                        error_section += "**FIX:** File path is wrong. Check the correct path or create the file in the right location.\n"
+                    if 'module not found' in error_lower or 'no module named' in error_lower:
+                        module_match = re.search(r"no module named ['\"]([^'\"]+)['\"]", error_lower)
+                        if module_match:
+                            error_section += f"**FIX:** Install missing module: `pip install {module_match.group(1)}`\n"
+                    if 'required arguments' in error_lower or 'the following arguments are required' in error_lower:
+                        error_section += "**FIX:** Command is missing required arguments. Check the command syntax and provide all required arguments.\n"
+                    if 'git clone' in error_lower and 'fatal' in error_lower:
+                        error_section += "**FIX:** Git clone failed. Skip this step or use alternative method (download zip, manual clone, etc.).\n"
+                
                 error_section += "\n**ACTION REQUIRED:**\n"
                 error_section += "1. Analyze each error above\n"
-                error_section += "2. Identify the root cause (missing dependency, syntax error, etc.)\n"
-                error_section += "3. Provide corrected commands/code to fix the errors\n"
+                error_section += "2. Apply the specific fix suggested for each error\n"
+                error_section += "3. Provide corrected commands/code\n"
                 error_section += "4. Execute the fixes\n"
                 error_section += "DO NOT ignore these errors - they MUST be fixed before the task can complete.\n"
-                error_section += "If a module is missing (like 'pandas'), install it: `pip install pandas`\n"
-                error_section += "If git clone fails, check the repository URL or use a different method.\n"
+            elif minor_warnings:
+                error_section = "\n\n⚠️ **Minor Warnings (not blocking):**\n"
+                for warning in minor_warnings[:3]:
+                    error_section += f"- {warning[:300]}\n"
+                error_section += "These are warnings and won't block completion, but you can address them if needed.\n"
             
             continuation_query = f"""
 {continuation_base_context}
