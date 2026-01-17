@@ -3121,6 +3121,7 @@ Return a new execution plan with specific, actionable steps.
             # Separate critical errors from minor warnings
             critical_errors = []
             minor_warnings = []
+            error_messages = []  # For reflection system
             for r in execution_results:
                 r_lower = r.lower()
                 if ('❌ ERROR' in r or '⏱️ TIMEOUT' in r or 'ERROR:' in r or 
@@ -3131,6 +3132,29 @@ Return a new execution plan with specific, actionable steps.
                         minor_warnings.append(r)
                     else:
                         critical_errors.append(r)
+                        error_messages.append(r)  # For reflection
+            
+            # Use reflection system to analyze failures if we have critical errors
+            reflection_analysis = None
+            if critical_errors and self.reflection_system:
+                try:
+                    # Extract commands executed
+                    commands_executed = []
+                    for result in execution_results:
+                        if 'Executed:' in result or '🔄 Executed' in result:
+                            cmd_match = re.search(r'`([^`]+)`', result)
+                            if cmd_match:
+                                commands_executed.append(cmd_match.group(1))
+                    
+                    reflection_analysis = self.reflection_system.analyze_failure(
+                        task_description=message,
+                        error_messages=error_messages,
+                        execution_results=execution_results,
+                        commands_executed=commands_executed[:10]  # Last 10 commands
+                    )
+                    logger.info(f"Reflection analysis: root_cause={reflection_analysis['root_cause']}, confidence={reflection_analysis['confidence']:.2f}")
+                except Exception as e:
+                    logger.warning(f"Error in reflection analysis: {e}")
             
             error_section = ""
             if critical_errors:
