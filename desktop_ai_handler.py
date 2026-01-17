@@ -3081,11 +3081,57 @@ Focus on completing the original objective.
                     if cmd.strip():
                         step_counter += 1
                         output, exit_code = self.execute_terminal_command(cmd.strip())
-                        execution_results.append(f"✅ Executed: `{cmd[:50]}...`\n```\n{output[:500]}\n```")
-                        await update.message.reply_text(
-                            f"🔄 **Executed:** `{cmd[:100]}`\n\n```\n{output[:500]}\n```",
-                            parse_mode='Markdown'
-                        )
+                        
+                        # Format result based on exit code and output
+                        if exit_code == 0:
+                            # Success
+                            execution_results.append(f"✅ Executed: `{cmd[:50]}...`\n```\n{output[:500]}\n```")
+                            await update.message.reply_text(
+                                f"🔄 **Executed:** `{cmd[:100]}`\n\n```\n{output[:500]}\n```",
+                                parse_mode='Markdown'
+                            )
+                        elif exit_code == 124 or "timed out" in output.lower():
+                            # Timeout error - format with context for AI correction
+                            error_msg = f"⏱️ TIMEOUT ERROR: `{cmd[:100]}`\n"
+                            error_msg += f"**Error Type:** Command timed out\n"
+                            error_msg += f"**Command:** `{cmd[:200]}`\n"
+                            error_msg += f"**Exit Code:** {exit_code}\n"
+                            error_msg += f"**Error Output:**\n```\n{output[:1000]}\n```\n"
+                            error_msg += f"**Suggested Fix:** Increase timeout, break into smaller commands, or optimize the command\n"
+                            execution_results.append(error_msg)
+                            await update.message.reply_text(
+                                f"⏱️ **Command Timed Out:** `{cmd[:100]}`\n\n```\n{output[:500]}\n```",
+                                parse_mode='Markdown'
+                            )
+                        else:
+                            # Other error - format with context for AI correction
+                            error_msg = f"❌ ERROR: `{cmd[:100]}`\n"
+                            error_msg += f"**Error Type:** Command execution failed\n"
+                            error_msg += f"**Command:** `{cmd[:200]}`\n"
+                            error_msg += f"**Exit Code:** {exit_code}\n"
+                            error_msg += f"**Error Output:**\n```\n{output[:1000]}\n```\n"
+                            
+                            # Add specific error detection and suggested fixes
+                            output_lower = output.lower()
+                            if "command not found" in output_lower or "not found" in output_lower:
+                                tool_name = cmd.split()[0] if cmd.split() else "unknown"
+                                error_msg += f"**Suggested Fix:** Install missing tool: `{tool_name}` or check if command exists\n"
+                            elif "permission denied" in output_lower:
+                                error_msg += f"**Suggested Fix:** Check file permissions or use sudo if appropriate\n"
+                            elif "no such file" in output_lower or "cannot access" in output_lower:
+                                error_msg += f"**Suggested Fix:** Check file path exists, create directory if needed\n"
+                            elif "syntax error" in output_lower:
+                                error_msg += f"**Suggested Fix:** Fix syntax error in command or script\n"
+                            elif "connection refused" in output_lower or "connection timeout" in output_lower:
+                                error_msg += f"**Suggested Fix:** Check network connectivity, target availability, firewall rules\n"
+                            else:
+                                error_msg += f"**Suggested Fix:** Review error output above and correct the command\n"
+                            
+                            execution_results.append(error_msg)
+                            await update.message.reply_text(
+                                f"❌ **Error:** `{cmd[:100]}`\n\n**Exit Code:** {exit_code}\n\n```\n{output[:500]}\n```",
+                                parse_mode='Markdown'
+                            )
                         
                         # Update plan file checkbox if TaskPlanManager is available
                         if self.task_plan_manager and hasattr(context, 'user_data'):
