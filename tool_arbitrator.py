@@ -212,16 +212,30 @@ class ToolArbitrator:
         
         path_lower = path.lower()
         
-        # Block system directories
-        blocked_paths = ['/', '/home', '/root', '/etc', '/usr', '/bin', '/sbin', '/var', '/sys', '/proc', '/dev']
-        for blocked in blocked_paths:
-            if path_lower.startswith(blocked) and path_lower != blocked + '/':
-                return False, f"Cannot operate on system directory: {blocked}"
+        # FIRST: Whitelist user workspace paths (CRITICAL - must check before blocking)
+        # Allow /app/user_* paths (user workspace directories)
+        if re.match(r'^/app/user_\d+', path_lower):
+            return True, "OK"
+        # Allow paths within /app/user_* directories
+        if '/app/user_' in path_lower:
+            return True, "OK"
         
-        # Allow safe paths
+        # Allow safe paths (including /app/)
         for safe_pattern in SAFE_PATHS:
             if re.search(safe_pattern, path, re.IGNORECASE):
                 return True, "OK"
+        
+        # Block system directories (but not /app/user_* which we already whitelisted)
+        blocked_paths = ['/home', '/root', '/etc', '/usr', '/bin', '/sbin', '/var', '/sys', '/proc', '/dev']
+        for blocked in blocked_paths:
+            if path_lower.startswith(blocked):
+                return False, f"Cannot operate on system directory: {blocked}"
+        
+        # Block root directory operations (except /app/user_*)
+        if path_lower == '/' or (path_lower.startswith('/') and not path_lower.startswith('/app/')):
+            # Check if it's actually a system path (not /app/user_*)
+            if not re.match(r'^/app/user_\d+', path_lower):
+                return False, f"Cannot operate on system directory: /"
         
         # Check if path is within workspace
         try:

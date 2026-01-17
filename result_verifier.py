@@ -119,30 +119,52 @@ class ResultVerifier:
         """Verify that tool execution actually occurred"""
         # Check exit code
         exit_code = execution_result.get('exit_code')
-        if exit_code is None:
-            return False
+        if exit_code is not None:
+            # Exit code exists - execution definitely occurred
+            # Check if output exists
+            output = execution_result.get('output', '')
+            error = execution_result.get('error', '')
+            output_length = execution_result.get('output_length', 0)
+            stdout_len = execution_result.get('stdout_len', 0)
+            stderr_len = execution_result.get('stderr_len', 0)
+            
+            # If we have output (any form), execution occurred
+            if output or error or output_length > 0 or stdout_len > 0 or stderr_len > 0:
+                return True
+            
+            # If exit code is non-zero, execution occurred (even if no output)
+            if exit_code != 0:
+                return True
         
-        # Check execution time (too short might indicate didn't run)
+        # Check execution time (too short might indicate didn't run, but only if no other indicators)
         execution_time = execution_result.get('execution_time', 0)
-        if execution_time < 0.1:  # Less than 100ms is suspicious
-            logger.warning(f"Suspiciously short execution time: {execution_time}s")
-            return False
+        if execution_time > 0:
+            # Execution time > 0 means execution occurred
+            if execution_time < 0.01:  # Less than 10ms is suspicious (but don't block if output exists)
+                logger.warning(f"Suspiciously short execution time: {execution_time}s")
+                # Don't return False here - check other indicators first
         
-        # Check if output exists
+        # Check if output exists (from any source)
         output = execution_result.get('output', '')
         error = execution_result.get('error', '')
+        output_length = execution_result.get('output_length', 0)
         
-        # If both output and error are empty, execution likely didn't happen
-        if not output and not error and exit_code == 0:
-            return False
+        # If we have output, execution occurred
+        if output or error or output_length > 0:
+            return True
         
         # Check for process indicators
         if 'process_id' in execution_result:
             # Process ID exists, execution occurred
             return True
         
-        # If we have output or error, assume execution occurred
-        return bool(output or error)
+        # If exit code exists and we have no output, still consider it executed
+        # (some commands produce no output but still execute)
+        if exit_code is not None:
+            return True
+        
+        # No indicators of execution
+        return False
     
     def _verify_output(self, execution_result: Dict) -> bool:
         """Verify output is valid"""
