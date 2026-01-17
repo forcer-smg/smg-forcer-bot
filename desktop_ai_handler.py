@@ -3319,7 +3319,70 @@ If you see errors, fix them. If dependencies are missing, install them. Then con
                         break
                     
                     # Check for errors that need fixing
-                    errors_in_results = [r for r in execution_results if '❌ ERROR' in r or '⏱️ TIMEOUT' in r or 'ERROR:' in r or 'exit code' in r.lower()]
+                    errors_in_results = [r for r in execution_results if '❌ ERROR' in r or '⏱️ TIMEOUT' in r or 'ERROR:' in r or 'exit code' in r.lower() or 'ModuleNotFoundError' in r or 'Traceback' in r]
+                    
+                    # If we have errors but empty response, generate explicit error fix prompt
+                    if errors_in_results and response_len < 50:
+                        # Generate explicit error fix prompt
+                        explicit_fix = "**🚨 ERRORS DETECTED - FIX REQUIRED:**\n\n"
+                        for i, error in enumerate(errors_in_results[:3], 1):
+                            error_preview = error[:800] + "..." if len(error) > 800 else error
+                            explicit_fix += f"**Error {i}:**\n{error_preview}\n\n"
+                        
+                        # Add specific fix instructions based on error types
+                        if any('ModuleNotFoundError' in e or 'No module named' in e for e in errors_in_results):
+                            # Extract module name
+                            module_name = None
+                            for e in errors_in_results:
+                                module_match = re.search(r"no module named ['\"]([^'\"]+)['\"]", e.lower())
+                                if module_match:
+                                    module_name = module_match.group(1)
+                                    break
+                            
+                            if module_name:
+                                # Map common module names to package names
+                                module_to_package = {
+                                    'dns': 'dnspython',
+                                    'dns.resolver': 'dnspython',
+                                    'bs4': 'beautifulsoup4',
+                                    'cv2': 'opencv-python',
+                                    'PIL': 'Pillow',
+                                    'yaml': 'pyyaml'
+                                }
+                                package_name = module_to_package.get(module_name, module_name)
+                                explicit_fix += f"**FIX:** Install missing Python module:\n```bash\npip install {package_name}\n```\n\n"
+                            else:
+                                explicit_fix += "**FIX:** Install missing Python modules:\n```bash\npip install <module_name>\n```\n\n"
+                        
+                        if any('git clone' in e.lower() and 'fatal' in e.lower() for e in errors_in_results):
+                            explicit_fix += "**FIX:** Git clone failed. Skip RedTeam-Tools or use alternative method.\n\n"
+                        
+                        explicit_fix += "**ACTION:** Provide corrected commands to fix the errors above, then continue with the task.\n"
+                        full_response += "\n\n---\n\n" + explicit_fix
+                        
+                        # Update continuation_query to include explicit fix
+                        continuation_query = f"""
+{continuation_base_context}
+
+Current status: {completion_check['status']}
+Remaining steps: {remaining_steps_text}
+{error_section}
+{explicit_fix}
+
+**TASK:** {message}
+
+**WHAT TO DO NOW:**
+1. FIX THE ERRORS ABOVE FIRST - The explicit fixes are shown above
+2. Execute the fix commands (e.g., `pip install <module>`)
+3. Then continue with the original task
+4. Generate commands/code to complete the task
+
+**IMPORTANT:** You MUST provide actual commands/code in code blocks (```bash or ```python). Do NOT send empty responses.
+"""
+                        
+                        # Retry with explicit fix prompt
+                        logger.info(f"Retrying with explicit error fix prompt (iteration {iteration})")
+                        continue  # Continue to next iteration with updated prompt
                     
                     if errors_in_results and (not next_response or len(next_response.strip()) < 50):
                         # Generate explicit error fix prompt (but don't send empty message)
