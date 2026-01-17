@@ -9746,9 +9746,14 @@ Continue your response now:
                                 files_to_send.append(file_info)
                             elif filename == 'requirements.txt':
                                 files_to_send.append(file_info)
-                            elif extension == '.md' and 'plan' in filename.lower():
-                                # Plan files are already added separately, but include them here too
-                                files_to_send.append(file_info)
+                            elif extension == '.md':
+                                # Include markdown files: plans, README, SUMMARY, GUIDE, documentation
+                                filename_lower = filename.lower()
+                                if any(keyword in filename_lower for keyword in [
+                                    'plan', 'readme', 'summary', 'guide', 'documentation', 
+                                    'report', 'analysis', 'overview', 'instructions', 'setup'
+                                ]):
+                                    files_to_send.append(file_info)
                         
                         # CURSOR-STYLE: Add plan file to send list (created silently, sent at end)
                         if hasattr(context, 'user_data') and context.user_data.get('current_plan_file'):
@@ -11579,9 +11584,14 @@ Continue your response now:
                                 files_to_send.append(file_info)
                             elif filename == 'requirements.txt':
                                 files_to_send.append(file_info)
-                            elif extension == '.md' and 'plan' in filename.lower():
-                                # Plan files are already added separately, but include them here too
-                                files_to_send.append(file_info)
+                            elif extension == '.md':
+                                # Include markdown files: plans, README, SUMMARY, GUIDE, documentation
+                                filename_lower = filename.lower()
+                                if any(keyword in filename_lower for keyword in [
+                                    'plan', 'readme', 'summary', 'guide', 'documentation', 
+                                    'report', 'analysis', 'overview', 'instructions', 'setup'
+                                ]):
+                                    files_to_send.append(file_info)
                         
                         # CURSOR-STYLE: Add plan file to send list (created silently, sent at end)
                         if hasattr(context, 'user_data') and context.user_data.get('current_plan_file'):
