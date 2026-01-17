@@ -8,6 +8,7 @@ import os
 import json
 import re
 import logging
+import asyncio
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 
@@ -207,23 +208,35 @@ Return comprehensive analysis in structured format:
         # Discover tools from MCP integration
         if mcp_integration:
             try:
-                mcp_tools = asyncio.run(mcp_integration.discover_all_tools())
+                # Handle async call - check if event loop is already running
+                try:
+                    # Try to get running loop - if this succeeds, we're in an async context
+                    loop = asyncio.get_running_loop()
+                    # We're in an async context, can't use asyncio.run()
+                    # Create a new event loop in a thread or skip MCP tools
+                    logger.warning("Cannot discover MCP tools: already in async context (asyncio.run() not allowed)")
+                    mcp_tools = []
+                except RuntimeError:
+                    # No running event loop, safe to use asyncio.run()
+                    mcp_tools = asyncio.run(mcp_integration.discover_all_tools())
+                
                 # Filter MCP tools relevant to task
-                task_lower = task.lower()
-                relevant_mcp_tools = []
-                for tool in mcp_tools:
-                    if (task_lower in tool.name.lower() or 
-                        task_lower in tool.description.lower() or
-                        any(keyword in tool.description.lower() for keyword in task_lower.split())):
-                        relevant_mcp_tools.append({
-                            'name': tool.name,
-                            'description': tool.description,
-                            'category': 'MCP',
-                            'mcp_tool': True,
-                            'parameters': tool.parameters
-                        })
-                tools.extend(relevant_mcp_tools)
-                logger.info(f"Discovered {len(relevant_mcp_tools)} MCP tools")
+                if mcp_tools:
+                    task_lower = task.lower()
+                    relevant_mcp_tools = []
+                    for tool in mcp_tools:
+                        if (task_lower in tool.name.lower() or 
+                            task_lower in tool.description.lower() or
+                            any(keyword in tool.description.lower() for keyword in task_lower.split())):
+                            relevant_mcp_tools.append({
+                                'name': tool.name,
+                                'description': tool.description,
+                                'category': 'MCP',
+                                'mcp_tool': True,
+                                'parameters': tool.parameters
+                            })
+                    tools.extend(relevant_mcp_tools)
+                    logger.info(f"Discovered {len(relevant_mcp_tools)} MCP tools")
             except Exception as e:
                 logger.error(f"Error discovering MCP tools: {e}")
         
