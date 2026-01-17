@@ -8256,6 +8256,76 @@ if __name__ == "__main__":
             should_detect_project = False
             logger.info(f"🔷 [PROJECT] Skipping project detection for simple message: '{message[:50]}'")
         
+        # ============================================================
+        # CRITICAL: FOLLOW-UP QUERY DETECTION - Check if user wants existing results
+        # ============================================================
+        is_followup_query = any(keyword in message_lower for keyword in [
+            'what did you', 'what did we', 'what currently', 'what is running', 'what\'s running',
+            'tell me', 'show me', 'give me', 'send me',
+            'update', 'status', 'progress', 'results', 'findings', 'what hit', 'what we hit',
+            'plain words', 'plain english', 'simple words', 'what really running'
+        ])
+        
+        if is_followup_query:
+            logger.info(f"🔷 [FOLLOW-UP] Detected follow-up query: '{message[:100]}'")
+            # Check if we have execution results from previous task
+            if hasattr(context, 'user_data'):
+                execution_results = context.user_data.get('last_execution_results', [])
+                # Also check memory bank for execution results
+                try:
+                    from memory_bank import get_memory_bank
+                    memory_bank = get_memory_bank(user_id)
+                    if memory_bank:
+                        recent_context = memory_bank.get_context_for_ai(message)
+                        # Extract execution results from context if available
+                        if 'execution results' in recent_context.lower() or 'executed' in recent_context.lower():
+                            execution_results = [recent_context]  # Use context as result
+                except Exception as e:
+                    logger.warning(f"Error checking memory bank for follow-up: {e}")
+                
+                if execution_results:
+                    logger.info(f"🔷 [FOLLOW-UP] Found {len(execution_results)} execution results, presenting to user")
+                    # Format and present existing results
+                    result_summary = "**📊 RESULTS FROM PREVIOUS TASK:**\n\n"
+                    
+                    # Extract key findings
+                    key_findings = []
+                    for result in execution_results[-10:]:  # Last 10 results
+                        result_lower = str(result).lower()
+                        if any(keyword in result_lower for keyword in ['tracking', 'vulnerability', 'found', 'endpoint', 'discovered', 'detected', 'hit', 'success']):
+                            # Extract meaningful content
+                            if isinstance(result, str):
+                                # Extract first 300 chars of meaningful content
+                                preview = result[:300]
+                                if '```' in preview:
+                                    # Extract code block content
+                                    code_match = re.search(r'```[^\n]*\n(.*?)\n```', preview, re.DOTALL)
+                                    if code_match:
+                                        preview = code_match.group(1)[:200]
+                                key_findings.append(preview)
+                    
+                    if key_findings:
+                        result_summary += "**Key Findings:**\n"
+                        for i, finding in enumerate(key_findings[:5], 1):
+                            result_summary += f"{i}. {finding}\n\n"
+                    else:
+                        result_summary += "**Execution Summary:**\n"
+                        for i, result in enumerate(execution_results[-5:], 1):
+                            result_preview = str(result)[:200]
+                            result_summary += f"{i}. {result_preview}\n\n"
+                    
+                    result_summary += "\n**Note:** These are results from previous task execution. If you need more details, ask specifically."
+                    
+                    # Send formatted results to user
+                    try:
+                        await update.message.reply_text(result_summary, parse_mode='Markdown')
+                        return result_summary
+                    except Exception as e:
+                        logger.error(f"Error sending follow-up results: {e}")
+                        # Fall through to normal processing if sending fails
+                else:
+                    logger.info(f"🔷 [FOLLOW-UP] No execution results found, proceeding with normal task flow")
+        
         if self.project_manager and should_detect_project:
             try:
                 phase_start = time.time()
