@@ -2044,10 +2044,21 @@ Example: ["What is the target URL?", "What format should the output be in?"]
             
             # Add recent action context from recent_results parameter
             if recent_results:
-                context_parts.append("[RECENT ACTIONS & RESULTS]")
+                context_parts.append("[RECENT ACTIONS & RESULTS - INCLUDING ERRORS]")
+                context_parts.append("⚠️ CRITICAL: If you see ERROR or TIMEOUT below, you MUST fix it in your next response!")
+                context_parts.append("")
                 for result in recent_results[-5:]:  # Last 5 results
-                    result_preview = result[:300] + "..." if len(result) > 300 else result
-                    context_parts.append(f"Action Result: {result_preview}")
+                    # Prioritize errors - show full error context
+                    if "❌ ERROR" in result or "⏱️ TIMEOUT" in result or "⚠️" in result:
+                        # Show full error message (up to 2000 chars for errors)
+                        error_preview = result[:2000] + "..." if len(result) > 2000 else result
+                        context_parts.append(f"🚨 ERROR/TIMEOUT (MUST FIX):\n{error_preview}")
+                    else:
+                        # Regular results - shorter preview
+                        result_preview = result[:500] + "..." if len(result) > 500 else result
+                        context_parts.append(f"Action Result: {result_preview}")
+                context_parts.append("")
+                context_parts.append("⚠️ REMEMBER: If there are errors above, analyze them and provide corrected commands/code in your response!")
                 context_parts.append("")
             
             # Add conversation history
