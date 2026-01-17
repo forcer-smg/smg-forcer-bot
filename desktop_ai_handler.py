@@ -2105,9 +2105,32 @@ Example: ["What is the target URL?", "What format should the output be in?"]
                 output, exit_code = self.execute_terminal_command(cmd)
                 
                 if exit_code == 0:
+                    # Success
                     execution_results.append(f"✅ Executed `{file_info['filename']}` successfully\n```\n{output[:1000]}\n```")
                 else:
-                    execution_results.append(f"⚠️ Executed `{file_info['filename']}` with exit code {exit_code}\n```\n{output[:1000]}\n```")
+                    # Error - format with context for AI correction
+                    error_msg = f"❌ ERROR: `{file_info['filename']}`\n"
+                    error_msg += f"**Error Type:** File execution failed\n"
+                    error_msg += f"**File:** `{file_info['filename']}`\n"
+                    error_msg += f"**Exit Code:** {exit_code}\n"
+                    error_msg += f"**Error Output:**\n```\n{output[:1000]}\n```\n"
+                    
+                    # Add specific error detection
+                    output_lower = output.lower()
+                    if "import error" in output_lower or "module not found" in output_lower:
+                        missing_module = re.search(r"no module named ['\"]([^'\"]+)['\"]", output_lower)
+                        if missing_module:
+                            error_msg += f"**Suggested Fix:** Install missing module: `pip install {missing_module.group(1)}`\n"
+                        else:
+                            error_msg += f"**Suggested Fix:** Install missing dependencies: `pip install -r requirements.txt`\n"
+                    elif "syntax error" in output_lower:
+                        error_msg += f"**Suggested Fix:** Fix syntax error in the file\n"
+                    elif "permission denied" in output_lower:
+                        error_msg += f"**Suggested Fix:** Make file executable: `chmod +x {file_info['filename']}`\n"
+                    else:
+                        error_msg += f"**Suggested Fix:** Review error output and fix the issue in the file\n"
+                    
+                    execution_results.append(error_msg)
                 
                 # Send result to user
                 result_preview = output[:500] + "..." if len(output) > 500 else output
