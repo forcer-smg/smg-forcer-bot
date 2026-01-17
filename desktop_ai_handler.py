@@ -2903,6 +2903,11 @@ Return JSON only: {{"is_complete": true/false, "status": "complete/incomplete/ne
         
         continuation_base_context = "\n".join(continuation_context_parts)
         
+        # Track executed commands to prevent infinite loops
+        executed_commands_history = []
+        recent_command_hashes = set()
+        import hashlib
+        
         # Continue until complete (not limited by max_iterations)
         while True:
             # Safety check - prevent infinite loops
