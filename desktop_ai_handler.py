@@ -3366,6 +3366,23 @@ If you see errors, fix them. If dependencies are missing, install them. Then con
                                 }
                                 package_name = module_to_package.get(module_name, module_name)
                                 explicit_fix += f"**FIX:** Install missing Python module:\n```bash\npip install {package_name}\n```\n\n"
+                                
+                                # AUTO-EXECUTE the fix command immediately
+                                logger.info(f"Auto-executing fix: pip install {package_name}")
+                                fix_cmd = f"pip install {package_name}"
+                                fix_output, fix_exit_code = self.execute_terminal_command(fix_cmd)
+                                
+                                if fix_exit_code == 0:
+                                    execution_results.append(f"✅ AUTO-FIXED: Installed {package_name}\n```\n{fix_output[:500]}\n```")
+                                    explicit_fix += f"✅ **AUTO-FIXED:** Installed `{package_name}` successfully.\n\n"
+                                    # Send notification to user
+                                    await update.message.reply_text(
+                                        f"🔧 **Auto-fixed:** Installed missing module `{package_name}`\n\n```\n{fix_output[:300]}\n```",
+                                        parse_mode='Markdown'
+                                    )
+                                else:
+                                    execution_results.append(f"⚠️ AUTO-FIX FAILED: pip install {package_name}\n```\n{fix_output[:500]}\n```")
+                                    explicit_fix += f"⚠️ **AUTO-FIX FAILED:** Could not install `{package_name}`. Manual fix required.\n\n"
                             else:
                                 explicit_fix += "**FIX:** Install missing Python modules:\n```bash\npip install <module_name>\n```\n\n"
                         
