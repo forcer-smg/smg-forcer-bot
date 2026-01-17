@@ -7868,7 +7868,7 @@ if __name__ == "__main__":
                 try:
                     comprehensive_report = await asyncio.wait_for(
                         self.comprehensive_vulnerability_scan(target_url, update, context),
-                        timeout=300.0  # 5 minute timeout
+                        timeout=1800.0  # 30 minutes for comprehensive scans
                     )
                 except asyncio.TimeoutError:
                     logger.error(f"Scan timed out after 5 minutes for {target_url}")
@@ -8413,7 +8413,7 @@ if __name__ == "__main__":
                 try:
                     comprehensive_report = await asyncio.wait_for(
                         self.comprehensive_vulnerability_scan(target_url, update, context),
-                        timeout=300.0  # 5 minute timeout
+                        timeout=1800.0  # 30 minutes for comprehensive scans
                     )
                 except asyncio.TimeoutError:
                     logger.error(f"Fallback scan timed out after 5 minutes for {target_url}")
