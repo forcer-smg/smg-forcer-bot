@@ -2694,8 +2694,10 @@ Return JSON only: {{"is_complete": true/false, "status": "complete/incomplete/ne
         """Auto-continue task until complete - continues until ALL steps are done"""
         # Safety limit to prevent infinite loops
         MAX_SAFE_ITERATIONS = 50
-        PER_ITERATION_TIMEOUT = 300  # 5 minutes per iteration
-        TOTAL_TIME_WARNING = 1800  # 30 minutes total
+        # Increased timeout for complex tasks (code generation, exploitation, comprehensive scans)
+        # Allow more time for tasks to complete and generate results with summaries
+        PER_ITERATION_TIMEOUT = 600  # 10 minutes per iteration (increased from 5 minutes)
+        TOTAL_TIME_WARNING = 3600  # 60 minutes total (increased from 30 minutes)
         
         full_response = initial_response
         iteration = 0
@@ -8086,15 +8088,17 @@ if __name__ == "__main__":
                 logger.info(f"Starting deep thinking phase for complex task type: {task_type}")
                 if user_mode == 'debug':
                     debug_logs.append("🐛 Starting deep thinking phase...")
-                # Add timeout to prevent hanging
+                # Add timeout to prevent hanging - increased for complex tasks
+                # Complex tasks (code generation, exploitation) need more time
+                deep_thinking_timeout = 120.0 if task_type in ['code_generation', 'exploitation', 'comprehensive'] else 90.0
                 try:
                     deep_thinking = await asyncio.wait_for(
                         self.deep_thinking_phase(message_with_context, task_type),
-                        timeout=60.0  # 60 second timeout for deep thinking
+                        timeout=deep_thinking_timeout
                     )
                     logger.info("Deep thinking phase completed")
                 except asyncio.TimeoutError:
-                    logger.warning("Deep thinking phase timed out after 60s, continuing without it")
+                    logger.warning(f"Deep thinking phase timed out after {deep_thinking_timeout}s, continuing without it")
                     deep_thinking = None
                 if user_mode == 'debug':
                     debug_logs.append(f"🐛 Deep thinking completed: {len(str(deep_thinking))} chars")

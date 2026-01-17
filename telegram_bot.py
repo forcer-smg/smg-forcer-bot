@@ -16,7 +16,7 @@ from dotenv import load_dotenv, set_key
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.helpers import escape_markdown as tg_escape_markdown
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TimedOut
 
 # Import modules
 from HacxGPT import Config, HacxBrain
@@ -3929,13 +3929,17 @@ You've used all your available requests.
                     except Exception as e:
                         logger.warning(f"Error storing AI response: {e}")
             finally:
-                # Stop typing indicator
+                # Stop typing indicator - with longer timeout and better error handling
                 logger.info(f"Cleaning up typing indicator for user {user_id}")
                 typing_task.cancel()
                 try:
-                    await asyncio.wait_for(typing_task, timeout=1.0)
+                    # Increased timeout to 5 seconds to allow graceful shutdown
+                    await asyncio.wait_for(typing_task, timeout=5.0)
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
+                except Exception as e:
+                    # Log but don't fail - typing cleanup errors are non-critical
+                    logger.warning(f"Typing indicator cleanup error (non-critical): {e}")
                 logger.info(f"Cleanup complete for user {user_id}")
             
             # Send screenshots if any
@@ -4169,13 +4173,29 @@ You've used all your available requests.
 
 
 async def send_typing_continuously(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Send typing indicator continuously while processing"""
+    """Send typing indicator continuously while processing - resilient to timeouts and errors"""
     try:
+        consecutive_errors = 0
+        max_consecutive_errors = 5  # Stop after 5 consecutive errors
+        
         while True:
-            await context.bot.send_chat_action(chat_id=chat_id, action='typing')
-            await asyncio.sleep(3)  # Telegram requires typing indicator every 3-5 seconds
+            try:
+                await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+                consecutive_errors = 0  # Reset on success
+                await asyncio.sleep(3)  # Telegram requires typing indicator every 3-5 seconds
+            except (TimedOut, Exception) as e:
+                # Handle Telegram API timeouts and other errors gracefully
+                consecutive_errors += 1
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.warning(f"Typing indicator stopped after {max_consecutive_errors} consecutive errors")
+                    break
+                # Wait longer before retry after error
+                await asyncio.sleep(5)
     except asyncio.CancelledError:
         pass
+    except Exception as e:
+        # Log but don't crash - typing indicator failure shouldn't stop the bot
+        logger.warning(f"Typing indicator error (non-critical): {e}")
 
 
 # Admin commands
