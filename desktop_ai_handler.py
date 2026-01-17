@@ -3067,15 +3067,39 @@ Return a new execution plan with specific, actionable steps.
             # Auto-query: "What's the next step? What still needs to be done?"
             remaining_steps_text = "\n".join(completion_check.get('remaining_steps', [])) if completion_check.get('remaining_steps') else "Continue working on the original task"
             
+            # Check for errors and include them explicitly in the query
+            errors_in_results = [r for r in execution_results if '❌ ERROR' in r or '⏱️ TIMEOUT' in r or 'ERROR:' in r or 'exit code' in r.lower()]
+            error_section = ""
+            if errors_in_results:
+                error_section = "\n\n🚨 **CRITICAL ERRORS DETECTED - YOU MUST FIX THESE NOW:**\n"
+                for i, error in enumerate(errors_in_results[:5], 1):  # Include up to 5 errors
+                    error_section += f"\n**ERROR {i}:**\n{error[:2000]}\n"
+                error_section += "\n**ACTION REQUIRED:**\n"
+                error_section += "1. Analyze each error above\n"
+                error_section += "2. Identify the root cause (missing dependency, syntax error, etc.)\n"
+                error_section += "3. Provide corrected commands/code to fix the errors\n"
+                error_section += "4. Execute the fixes\n"
+                error_section += "DO NOT ignore these errors - they MUST be fixed before the task can complete.\n"
+                error_section += "If a module is missing (like 'pandas'), install it: `pip install pandas`\n"
+                error_section += "If git clone fails, check the repository URL or use a different method.\n"
+            
             continuation_query = f"""
 {continuation_base_context}
 
 Current status: {completion_check['status']}
 Remaining steps: {remaining_steps_text}
+{error_section}
 
-What still needs to be done to complete the original task: "{message}"?
-What's the next step? Continue working on this specific task. Do NOT generate random commands.
-Focus on completing the original objective.
+**TASK:** {message}
+
+**WHAT TO DO NOW:**
+1. If there are errors above, FIX THEM FIRST - install missing dependencies, fix syntax errors, etc.
+2. Then continue with the original task
+3. Generate commands/code to complete the task
+4. Execute the commands/code
+
+**IMPORTANT:** You MUST provide actual commands/code in code blocks (```bash or ```python). Do NOT send empty responses.
+If you see errors, fix them. If dependencies are missing, install them. Then continue with the task.
 """
             
             # Send status update
@@ -3133,8 +3157,17 @@ Focus on completing the original objective.
                         f"⏱️ Iteration {iteration + 1} timed out. Continuing with next iteration...",
                         parse_mode='Markdown'
                     )
+                    next_response = ""  # Clear response if timed out
                 
-                full_response += "\n\n---\n\n**Continuation:**\n\n" + next_response
+                # Only add continuation if we got a response
+                if next_response and next_response.strip():
+                    full_response += "\n\n---\n\n**Continuation:**\n\n" + next_response
+                else:
+                    # If no response (timeout or empty), log and continue
+                    logger.warning(f"Iteration {iteration} produced empty response, continuing to next iteration")
+                    if not next_response:
+                        # Add a note that we're continuing
+                        full_response += "\n\n---\n\n**Note:** Continuing to next iteration..."
                 
                 # Check for new commands to execute
                 command_pattern = re.compile(r'```(?:bash|sh|python|cmd|powershell)?\s*\n(.*?)\n```', re.DOTALL | re.IGNORECASE)
