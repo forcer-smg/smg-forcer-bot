@@ -3835,6 +3835,12 @@ Remaining steps: {remaining_steps_text}
             iteration += 1
             safety_iteration += 1
         
+        # Store execution results in context for follow-up queries
+        if hasattr(context, 'user_data'):
+            context.user_data['last_execution_results'] = execution_results
+            context.user_data['last_generated_files'] = generated_files
+            logger.info(f"Stored {len(execution_results)} execution results in context for follow-up queries")
+        
         # Generate summary and send files before returning (Phase 2)
         if not completion_check.get('summary_generated', False):
             # Get task_id from context if available
