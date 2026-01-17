@@ -2147,12 +2147,27 @@ Example: ["What is the target URL?", "What format should the output be in?"]
                     error_msg += f"**Exit Code:** {exit_code}\n"
                     error_msg += f"**Error Output:**\n```\n{output[:1000]}\n```\n"
                     
-                    # Add specific error detection
+                    # Add specific error detection with module name mapping
                     output_lower = output.lower()
-                    if "import error" in output_lower or "module not found" in output_lower:
+                    if "import error" in output_lower or "module not found" in output_lower or "modulenotfounderror" in output_lower:
                         missing_module = re.search(r"no module named ['\"]([^'\"]+)['\"]", output_lower)
                         if missing_module:
-                            error_msg += f"**Suggested Fix:** Install missing module: `pip install {missing_module.group(1)}`\n"
+                            module_name = missing_module.group(1)
+                            # Map common module names to package names
+                            module_to_package = {
+                                'dns': 'dnspython',
+                                'dns.resolver': 'dnspython',
+                                'bs4': 'beautifulsoup4',
+                                'cv2': 'opencv-python',
+                                'PIL': 'Pillow',
+                                'yaml': 'pyyaml',
+                                'pandas': 'pandas',
+                                'numpy': 'numpy',
+                                'requests': 'requests',
+                                'aiohttp': 'aiohttp'
+                            }
+                            package_name = module_to_package.get(module_name, module_name)
+                            error_msg += f"**Suggested Fix:** Install missing module: `pip install {package_name}`\n"
                         else:
                             error_msg += f"**Suggested Fix:** Install missing dependencies: `pip install -r requirements.txt`\n"
                     elif "syntax error" in output_lower:
