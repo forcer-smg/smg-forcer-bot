@@ -2392,9 +2392,50 @@ Return JSON only: {{"is_complete": true/false, "status": "complete/incomplete/ne
         if not completion.get('results_valid', False):
             completion['results_valid'] = (
                 len(execution_results) > 0 and 
-                any('Executed' in r or '✅' in r for r in execution_results) and
+                any('Executed' in r or '✅' in r or '🔄 Executed' in r for r in execution_results) and
                 any(len(r) > 50 for r in execution_results)  # Meaningful results
             )
+        
+        # ENHANCED: Check if user's request was fulfilled by results
+        # This ensures task completes when user gets what they asked for
+        user_message_lower = original_message.lower()
+        request_fulfilled = False
+        
+        # Check for specific user requests in results
+        if 'tracking number' in user_message_lower or 'tracking' in user_message_lower:
+            # Check if tracking numbers were found in execution results
+            has_tracking = any('tracking' in r.lower() and ('found' in r.lower() or 'number' in r.lower() or 'discovered' in r.lower()) for r in execution_results)
+            if has_tracking:
+                request_fulfilled = True
+                logger.info("Completion check: User requested tracking numbers and they were found in results")
+        
+        if 'vulnerability' in user_message_lower or 'exploit' in user_message_lower or 'vuln' in user_message_lower:
+            # Check if vulnerabilities were found
+            has_vulns = any('vulnerability' in r.lower() or 'vuln' in r.lower() for r in execution_results)
+            if has_vulns:
+                request_fulfilled = True
+                logger.info("Completion check: User requested vulnerabilities and they were found in results")
+        
+        if 'update' in user_message_lower or 'progress' in user_message_lower or 'status' in user_message_lower or ('what' in user_message_lower and 'found' in user_message_lower):
+            # User just wants update/status, not new execution
+            if len(execution_results) > 0:
+                request_fulfilled = True
+                logger.info("Completion check: User requested update/status and results exist")
+        
+        if 'send me' in user_message_lower or 'give me' in user_message_lower or 'show me' in user_message_lower:
+            # User wants specific data - check if it exists in results
+            # Extract what they want
+            if any(keyword in user_message_lower for keyword in ['tracking', 'number', 'vulnerability', 'endpoint', 'result', 'finding']):
+                # Check if that data exists in results
+                if len(execution_results) > 0:
+                    request_fulfilled = True
+                    logger.info("Completion check: User requested specific data and results exist")
+        
+        # If request is fulfilled and results are valid, mark as complete
+        if request_fulfilled and completion['results_valid']:
+            completion['is_complete'] = True
+            completion['status'] = 'complete_with_results'
+            logger.info("Completion check: User's request fulfilled with results - marking as complete")
         
         # CRITICAL: Check for errors in execution_results - if errors exist, task is NOT complete
         # But allow completion if errors are minor/warnings (like GOOGLE_API_KEY warnings)
@@ -2895,11 +2936,76 @@ Return JSON only: {{"is_complete": true/false, "status": "complete/incomplete/ne
         if previous_scan_results:
             continuation_context_parts.append(f"\nPrevious scan results: {previous_scan_results[:1000]}")
         
+        # Build comprehensive execution summary for AI context
+        # This ensures AI is fully aware of what was already done
+        execution_summary_parts = []
         if execution_results:
-            continuation_context_parts.append(f"\nExecution results: {len(execution_results)} commands executed")
-            # Include last few execution results
-            for result in execution_results[-3:]:
-                continuation_context_parts.append(f"- {result[:200]}")
+            execution_summary_parts.append(f"\n**EXECUTION SUMMARY (What You've Already Done):**")
+            execution_summary_parts.append(f"Total commands executed: {len(execution_results)}")
+            
+            # Group results by type for better organization
+            successful_executions = [r for r in execution_results if '✅' in r or 'Executed' in r or '🔄 Executed' in r]
+            errors = [r for r in execution_results if '❌' in r or 'ERROR' in r or '⏱️ TIMEOUT' in r]
+            files_generated = [r for r in execution_results if 'Generated' in r or '📄' in r or '**Generated File:**' in r]
+            
+            if successful_executions:
+                execution_summary_parts.append(f"\n✅ **Successful Executions ({len(successful_executions)}):**")
+                # Show last 15 successful executions (not just 3) with full context
+                for i, result in enumerate(successful_executions[-15:], 1):
+                    # Extract command and output for clarity
+                    cmd_match = re.search(r'Executed[:\s]+`?([^`\n]+)`?', result)
+                    if cmd_match:
+                        cmd = cmd_match.group(1)[:150]
+                        # Extract output if available
+                        output_match = re.search(r'```\n(.*?)\n```', result, re.DOTALL)
+                        if output_match:
+                            output_preview = output_match.group(1)[:300]
+                            execution_summary_parts.append(f"  {i}. Command: `{cmd}`")
+                            execution_summary_parts.append(f"     Output: {output_preview}...")
+                        else:
+                            execution_summary_parts.append(f"  {i}. `{cmd}`")
+                    else:
+                        # Fallback: show first 300 chars
+                        execution_summary_parts.append(f"  {i}. {result[:300]}")
+            
+            if files_generated:
+                execution_summary_parts.append(f"\n📄 **Files Generated ({len(files_generated)}):**")
+                # Extract unique filenames
+                seen_files = set()
+                for result in files_generated[-15:]:
+                    file_match = re.search(r'Generated[:\s]+`?([^`\n]+)`?|📄.*?`([^`]+)`', result)
+                    if file_match:
+                        filename = file_match.group(1) or file_match.group(2)
+                        if filename and filename not in seen_files:
+                            seen_files.add(filename)
+                            execution_summary_parts.append(f"  - `{filename}`")
+            
+            if errors:
+                execution_summary_parts.append(f"\n❌ **Errors Encountered ({len(errors)}):**")
+                for i, result in enumerate(errors[-5:], 1):  # Last 5 errors
+                    error_preview = result[:400]  # More context for errors
+                    execution_summary_parts.append(f"  {i}. {error_preview}")
+            
+            # Add key findings/results summary
+            key_findings = []
+            for result in execution_results:
+                result_lower = result.lower()
+                if 'tracking' in result_lower and ('found' in result_lower or 'number' in result_lower):
+                    key_findings.append("Tracking numbers found")
+                if 'vulnerability' in result_lower or 'vuln' in result_lower:
+                    key_findings.append("Vulnerabilities detected")
+                if 'endpoint' in result_lower and 'found' in result_lower:
+                    key_findings.append("Endpoints discovered")
+            
+            if key_findings:
+                unique_findings = list(set(key_findings))
+                execution_summary_parts.append(f"\n🔍 **Key Findings:**")
+                for finding in unique_findings:
+                    execution_summary_parts.append(f"  - {finding}")
+        
+        execution_summary_text = "\n".join(execution_summary_parts)
+        if execution_summary_text:
+            continuation_context_parts.append(execution_summary_text)
         
         continuation_base_context = "\n".join(continuation_context_parts)
         
@@ -3223,23 +3329,132 @@ Return a new execution plan with specific, actionable steps.
                     error_section += f"- {warning[:300]}\n"
                 error_section += "These are warnings and won't block completion, but you can address them if needed.\n"
             
+            # Build progress summary for AI awareness
+            progress_summary_parts = []
+            progress_summary_parts.append("\n**PROGRESS SUMMARY:**")
+            progress_summary_parts.append(f"- Commands executed: {len(execution_results)}")
+            progress_summary_parts.append(f"- Files generated: {len(generated_files)}")
+            progress_summary_parts.append(f"- Iterations completed: {iteration}")
+            progress_summary_parts.append(f"- Time elapsed: {total_time/60:.1f} minutes")
+            
+            # Check if we have meaningful results
+            has_results = any('Executed' in r or '✅' in r or '🔄 Executed' in r for r in execution_results)
+            if has_results:
+                progress_summary_parts.append("\n**RESULTS OBTAINED:**")
+                # Extract key results from recent executions
+                recent_results = execution_results[-10:]  # Last 10 results
+                for result in recent_results:
+                    if 'Executed' in result or '✅' in result:
+                        # Extract key information
+                        result_lower = result.lower()
+                        if any(keyword in result_lower for keyword in ['tracking', 'vulnerability', 'found', 'endpoint', 'discovered', 'detected']):
+                            # Extract the meaningful part
+                            if '```' in result:
+                                # Extract code block content
+                                code_match = re.search(r'```[^\n]*\n(.*?)\n```', result, re.DOTALL)
+                                if code_match:
+                                    code_content = code_match.group(1)[:400]
+                                    progress_summary_parts.append(f"- {code_content}")
+                            else:
+                                progress_summary_parts.append(f"- {result[:400]}")
+            
+            progress_summary_text = "\n".join(progress_summary_parts)
+            
+            # Build "What You've Already Done" section
+            already_done_parts = []
+            already_done_parts.append("\n**WHAT YOU'VE ALREADY DONE:**")
+            already_done_parts.append(f"- Executed {len(execution_results)} commands")
+            already_done_parts.append(f"- Generated {len(generated_files)} files")
+            already_done_parts.append(f"- Completed {iteration} iterations")
+            
+            # List specific accomplishments
+            successful_executions = [r for r in execution_results if '✅' in r or 'Executed' in r or '🔄 Executed' in r]
+            files_generated_list = [r for r in execution_results if 'Generated' in r or '📄' in r or '**Generated File:**' in r]
+            key_findings_list = []
+            for result in execution_results:
+                result_lower = result.lower()
+                if 'tracking' in result_lower and ('found' in result_lower or 'number' in result_lower):
+                    key_findings_list.append("Tracking numbers found")
+                if 'vulnerability' in result_lower or 'vuln' in result_lower:
+                    key_findings_list.append("Vulnerabilities detected")
+                if 'endpoint' in result_lower and 'found' in result_lower:
+                    key_findings_list.append("Endpoints discovered")
+            
+            if successful_executions:
+                already_done_parts.append(f"- Successfully executed {len(successful_executions)} commands")
+            if files_generated_list:
+                already_done_parts.append(f"- Generated {len(files_generated_list)} files")
+            if key_findings_list:
+                unique_findings = list(set(key_findings_list))
+                already_done_parts.append(f"- Found: {', '.join(unique_findings[:5])}")
+            
+            already_done_text = "\n".join(already_done_parts)
+            
+            # Check if we have aggregated results from previous iteration
+            aggregated_results_section = ""
+            if hasattr(context, 'user_data') and context.user_data.get('aggregated_results'):
+                agg_results = context.user_data['aggregated_results']
+                if agg_results.get('summary'):
+                    aggregated_results_section = "\n**RESULTS FOUND IN EXECUTION:**\n"
+                    aggregated_results_section += "\n".join(f"- {s}" for s in agg_results['summary'])
+                    if agg_results.get('tracking_numbers'):
+                        aggregated_results_section += f"\n\n**Tracking Numbers ({len(agg_results['tracking_numbers'])}):**\n"
+                        for tn in agg_results['tracking_numbers'][:20]:  # First 20
+                            aggregated_results_section += f"- {tn}\n"
+                    if agg_results.get('vulnerabilities'):
+                        aggregated_results_section += f"\n\n**Vulnerabilities ({len(agg_results['vulnerabilities'])}):**\n"
+                        for vuln in agg_results['vulnerabilities'][:10]:  # First 10
+                            aggregated_results_section += f"- {vuln[:200]}\n"
+            
             continuation_query = f"""
 {continuation_base_context}
+
+{progress_summary_text}
+
+{already_done_text}
+
+{aggregated_results_section}
 
 Current status: {completion_check['status']}
 Remaining steps: {remaining_steps_text}
 {error_section}
 
-**TASK:** {message}
+**ORIGINAL TASK:** {message}
 
-**WHAT TO DO NOW:**
-1. If there are errors above, FIX THEM FIRST - install missing dependencies, fix syntax errors, etc.
-2. Then continue with the original task
-3. Generate commands/code to complete the task
-4. Execute the commands/code
+**CRITICAL INSTRUCTIONS FOR CONTINUOUS WORK AWARENESS:**
 
-**IMPORTANT:** You MUST provide actual commands/code in code blocks (```bash or ```python). Do NOT send empty responses.
-If you see errors, fix them. If dependencies are missing, install them. Then continue with the task.
+1. **YOU ARE CONTINUING AN ONGOING TASK** - This is NOT a new task. You have already:
+   - Executed {len(execution_results)} commands
+   - Generated {len(generated_files)} files
+   - Completed {iteration} iterations
+   - Obtained results (see execution summary above)
+
+2. **USE EXISTING RESULTS** - If you see execution results above showing successful commands:
+   - DO NOT re-execute the same commands
+   - DO NOT create new plans
+   - USE the existing results
+   - AGGREGATE and PRESENT the results to the user
+   - If user asked for specific data (e.g., tracking numbers), extract it from existing results
+
+3. **FOLLOW-UP QUERIES** - If the user asks:
+   - "update" or "status" → Present what you've found so far
+   - "send me X" → Extract X from existing results and present it
+   - "what did you find" → Summarize findings from execution results
+   - DO NOT generate new code/commands, USE existing results
+
+4. **WHAT TO DO NOW:**
+   - If there are errors above, FIX THEM FIRST
+   - If you have results from executed commands, AGGREGATE AND PRESENT THEM
+   - DO NOT create a new plan - continue from where you left off
+   - If results exist, format them for the user instead of generating new code
+   - Only generate new commands if results don't exist yet
+
+5. **IMPORTANT:** You MUST provide actual commands/code in code blocks (```bash or ```python) OR present existing results. Do NOT send empty responses.
+   - If you see execution results with data, PRESENT that data
+   - If you need to continue, provide the NEXT command (not a duplicate)
+   - If task is complete, present a summary of findings
+
+**REMEMBER:** You are aware of all previous work. Use it. Don't start over.
 """
             
             # Send status update (only if we have meaningful progress or errors to fix)
@@ -3555,6 +3770,67 @@ Remaining steps: {remaining_steps_text}
                     f"⚠️ Error in iteration {iteration + 1}: {str(e)[:200]}\n\nContinuing...",
                     parse_mode='Markdown'
                 )
+            
+            # Before continuing to next iteration, check if we should aggregate and present results
+            # This ensures AI is aware of results and can present them on follow-up queries
+            if len(execution_results) > 0 and iteration > 0:
+                # Check if user asked for specific data (follow-up query)
+                user_message_lower = message.lower()
+                should_present_results = any(keyword in user_message_lower for keyword in [
+                    'update', 'status', 'what', 'found', 'send me', 'give me', 'show me', 'tell me', 
+                    'progress', 'result', 'finding', 'tracking', 'vulnerability'
+                ])
+                
+                # Aggregate results if we should present them
+                if should_present_results:
+                    aggregated_results = {
+                        'tracking_numbers': [],
+                        'vulnerabilities': [],
+                        'endpoints': [],
+                        'files': [],
+                        'summary': []
+                    }
+                    
+                    # Parse execution results for key information
+                    for result in execution_results:
+                        result_lower = result.lower()
+                        
+                        # Extract tracking numbers
+                        if 'tracking' in result_lower:
+                            # Try to extract tracking numbers (MTCN format: 8-10 digits)
+                            tn_matches = re.findall(r'(?:tracking|mtc|mtcn)[\s#:]*([A-Z0-9]{8,12})', result, re.IGNORECASE)
+                            aggregated_results['tracking_numbers'].extend(tn_matches)
+                            # Also look for patterns like "1234567890" in tracking context
+                            if 'tracking' in result_lower:
+                                number_matches = re.findall(r'\b([0-9]{8,12})\b', result)
+                                aggregated_results['tracking_numbers'].extend(number_matches[:5])  # Limit to avoid false positives
+                        
+                        # Extract vulnerabilities
+                        if 'vulnerability' in result_lower or 'vuln' in result_lower:
+                            vuln_matches = re.findall(r'(?:vulnerability|vuln)[\s:]+([^\n]+)', result, re.IGNORECASE)
+                            aggregated_results['vulnerabilities'].extend(vuln_matches)
+                        
+                        # Extract endpoints/URLs
+                        if 'endpoint' in result_lower or 'url' in result_lower:
+                            url_matches = re.findall(r'https?://[^\s\)]+', result)
+                            aggregated_results['endpoints'].extend(url_matches)
+                    
+                    # Remove duplicates
+                    aggregated_results['tracking_numbers'] = list(set(aggregated_results['tracking_numbers']))[:50]  # Limit to 50
+                    aggregated_results['vulnerabilities'] = list(set(aggregated_results['vulnerabilities']))[:20]
+                    aggregated_results['endpoints'] = list(set(aggregated_results['endpoints']))[:30]
+                    
+                    # Build summary
+                    if aggregated_results['tracking_numbers']:
+                        aggregated_results['summary'].append(f"Found {len(aggregated_results['tracking_numbers'])} tracking numbers")
+                    if aggregated_results['vulnerabilities']:
+                        aggregated_results['summary'].append(f"Found {len(aggregated_results['vulnerabilities'])} vulnerabilities")
+                    if aggregated_results['endpoints']:
+                        aggregated_results['summary'].append(f"Found {len(aggregated_results['endpoints'])} endpoints")
+                    
+                    # Store aggregated results in context for next iteration
+                    if hasattr(context, 'user_data'):
+                        context.user_data['aggregated_results'] = aggregated_results
             
             iteration += 1
             safety_iteration += 1
