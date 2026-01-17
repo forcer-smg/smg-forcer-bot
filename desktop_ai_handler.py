@@ -3448,6 +3448,7 @@ Remaining steps: {remaining_steps_text}
                 
                 # Check for new commands to execute (only if we have a response)
                 new_commands = []
+                step_counter = 0  # Initialize BEFORE checking response
                 if next_response and len(next_response.strip()) >= 50:
                     command_pattern = re.compile(r'```(?:bash|sh|python|cmd|powershell)?\s*\n(.*?)\n```', re.DOTALL | re.IGNORECASE)
                     new_commands = command_pattern.findall(next_response)
@@ -3455,7 +3456,6 @@ Remaining steps: {remaining_steps_text}
                     logger.info(f"No commands to execute - response was empty or too short (len={len(next_response.strip()) if next_response else 0})")
                 
                 # Execute new commands (only if we have any)
-                step_counter = 0
                 for cmd in new_commands:
                     if cmd.strip():
                         # Check for duplicate commands to prevent infinite loops
