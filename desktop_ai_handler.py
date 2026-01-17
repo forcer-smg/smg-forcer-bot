@@ -57,6 +57,20 @@ except ImportError:
     logger.warning("rag_system not available")
 
 try:
+    from evaluation_system import EvaluationSystem
+    EVALUATION_SYSTEM_AVAILABLE = True
+except ImportError:
+    EVALUATION_SYSTEM_AVAILABLE = False
+    logger.warning("evaluation_system not available")
+
+try:
+    from reflection_system import ReflectionSystem
+    REFLECTION_SYSTEM_AVAILABLE = True
+except ImportError:
+    REFLECTION_SYSTEM_AVAILABLE = False
+    logger.warning("reflection_system not available")
+
+try:
     from background_processor import get_background_processor, ResponseFormatter
     BACKGROUND_PROCESSOR_AVAILABLE = True
 except ImportError:
@@ -3123,21 +3137,35 @@ Return a new execution plan with specific, actionable steps.
                 error_section = "\n\n🚨 **CRITICAL ERRORS DETECTED - YOU MUST FIX THESE NOW:**\n"
                 for i, error in enumerate(critical_errors[:5], 1):  # Include up to 5 critical errors
                     error_section += f"\n**ERROR {i}:**\n{error[:2000]}\n"
+                
+                # Add reflection analysis if available
+                if reflection_analysis:
+                    reflection_text = self.reflection_system.format_reflection_for_prompt(reflection_analysis)
+                    error_section += reflection_text
                     
-                    # Add specific fix suggestions based on error content
-                    error_lower = error.lower()
-                    if 'httpx' in error_lower and ('-s' in error_lower or 'no such option' in error_lower):
-                        error_section += "**FIX:** httpx doesn't support `-s` flag. Use `-silent` or remove the flag.\n"
-                    if 'can\'t open file' in error_lower or 'no such file' in error_lower:
-                        error_section += "**FIX:** File path is wrong. Check the correct path or create the file in the right location.\n"
-                    if 'module not found' in error_lower or 'no module named' in error_lower:
-                        module_match = re.search(r"no module named ['\"]([^'\"]+)['\"]", error_lower)
-                        if module_match:
-                            error_section += f"**FIX:** Install missing module: `pip install {module_match.group(1)}`\n"
-                    if 'required arguments' in error_lower or 'the following arguments are required' in error_lower:
-                        error_section += "**FIX:** Command is missing required arguments. Check the command syntax and provide all required arguments.\n"
-                    if 'git clone' in error_lower and 'fatal' in error_lower:
-                        error_section += "**FIX:** Git clone failed. Skip this step or use alternative method (download zip, manual clone, etc.).\n"
+                    # Add specific fixes from reflection
+                    if reflection_analysis.get('suggested_fixes'):
+                        error_section += "\n**Specific Fixes from Reflection:**\n"
+                        for fix in reflection_analysis['suggested_fixes'][:5]:
+                            error_section += f"- {fix}\n"
+                else:
+                    # Fallback to basic fix suggestions
+                    for error in critical_errors[:3]:
+                        error_lower = error.lower()
+                        if 'httpx' in error_lower and ('-s' in error_lower or 'no such option' in error_lower):
+                            error_section += "**FIX:** httpx doesn't support `-s` flag. Use `-silent` or remove the flag.\n"
+                        if 'can\'t open file' in error_lower or 'no such file' in error_lower:
+                            error_section += "**FIX:** File path is wrong. Check the correct path or create the file in the right location.\n"
+                        if 'module not found' in error_lower or 'no module named' in error_lower:
+                            module_match = re.search(r"no module named ['\"]([^'\"]+)['\"]", error_lower)
+                            if module_match:
+                                error_section += f"**FIX:** Install missing module: `pip install {module_match.group(1)}`\n"
+                        if 'required arguments' in error_lower or 'the following arguments are required' in error_lower:
+                            error_section += "**FIX:** Command is missing required arguments. Check the command syntax and provide all required arguments.\n"
+                        if 'git clone' in error_lower and 'fatal' in error_lower:
+                            error_section += "**FIX:** Git clone failed. Skip this step or use alternative method (download zip, manual clone, etc.).\n"
+                        if 'libpcre3-dev' in error_lower or 'has no installation candidate' in error_lower:
+                            error_section += "**FIX:** Package not available. Try: `apt-get install libpcre2-dev` or `libpcre-dev`\n"
                 
                 error_section += "\n**ACTION REQUIRED:**\n"
                 error_section += "1. Analyze each error above\n"
