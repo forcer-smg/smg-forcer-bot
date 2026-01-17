@@ -3075,11 +3075,23 @@ Focus on completing the original objective.
                 # Add per-iteration timeout
                 iteration_start = time.time()
                 # Load memory context for continuation with previous results
+                # Prioritize errors - include ALL errors, not just last 5
+                recent_results_for_ai = []
+                if execution_results:
+                    # First, add ALL errors (they're critical)
+                    errors = [r for r in execution_results if '❌ ERROR' in r or '⏱️ TIMEOUT' in r or 'ERROR:' in r]
+                    recent_results_for_ai.extend(errors)
+                    # Then add last 5 non-error results
+                    non_errors = [r for r in execution_results if r not in errors][-5:]
+                    recent_results_for_ai.extend(non_errors)
+                    # Limit to last 10 total to avoid context overflow
+                    recent_results_for_ai = recent_results_for_ai[-10:]
+                
                 enhanced_message = self.load_memory_context(
                     update.effective_user.id if hasattr(update, 'effective_user') else 0,
                     continuation_query,
                     context=context,
-                    recent_results=execution_results[-5:] if execution_results else None
+                    recent_results=recent_results_for_ai if recent_results_for_ai else None
                 )
                 
                 # Stream response (with deep thinking if available) - with timeout
