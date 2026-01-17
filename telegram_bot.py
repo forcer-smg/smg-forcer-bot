@@ -16,7 +16,7 @@ from dotenv import load_dotenv, set_key
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.helpers import escape_markdown as tg_escape_markdown
-from telegram.error import BadRequest, RetryAfter, TimedOut
+from telegram.error import BadRequest
 
 # Import modules
 from HacxGPT import Config, HacxBrain
@@ -99,13 +99,6 @@ user_sessions_lock = threading.Lock()  # Lock for thread-safe access
 user_rate_limits: Dict[int, float] = {}
 user_rate_limits_lock = threading.Lock()
 
-# Message edit tracking (for safe_edit_message_text)
-_message_edit_cache: Dict[str, str] = {}  # message_id -> content
-_message_edit_times: Dict[str, float] = {}  # message_id -> last_edit_time
-_message_edit_failures: Dict[str, int] = {}  # message_id -> consecutive_failures
-_message_edit_lock = asyncio.Lock()  # Async lock for concurrent edits
-_edit_in_progress: Dict[str, bool] = {}  # message_id -> is_editing
-
 # Concurrency management for 500+ users
 try:
     from concurrency_manager import get_concurrency_manager, ConcurrencyManager
@@ -131,27 +124,6 @@ except ImportError:
 
 # Global application instance (set in main())
 bot_application = None
-
-# Helper function to get workspace root (Railway/Linux compatible)
-def get_workspace_root() -> str:
-    """
-    Get workspace root directory, defaulting to /app on Railway/Linux
-    
-    Returns:
-        Workspace root path (str)
-    """
-    import sys
-    # Check if WORKSPACE_ROOT is set
-    workspace_root = os.getenv('WORKSPACE_ROOT')
-    if workspace_root:
-        return workspace_root
-    
-    # On Railway/Linux, default to /app if it exists
-    if (sys.platform == 'linux' or sys.platform.startswith('linux')) and os.path.exists('/app'):
-        return '/app'
-    
-    # Fallback to current working directory
-    return os.getcwd()
 
 # Helper function to execute database queries (handles both SQLite and PostgreSQL)
 def execute_db_query(conn, query, params):
@@ -268,9 +240,7 @@ def ensure_mode_keyboard_at_bottom(user_id: int, context: ContextTypes.DEFAULT_T
                 return existing_keyboard
         
         # Append mode buttons as last row
-        # Convert existing_rows to list if it's a tuple
-        existing_rows_list = list(existing_rows) if isinstance(existing_rows, tuple) else existing_rows
-        combined_rows = existing_rows_list + [mode_buttons_row]
+        combined_rows = existing_rows + [mode_buttons_row]
         return InlineKeyboardMarkup(combined_rows)
     
     # No existing keyboard, return just mode keyboard
@@ -363,195 +333,23 @@ async def safe_reply_text(update: Update, text: str, parse_mode: str = 'Markdown
             raise
 
 
-# Message edit rate limiting and failure tracking (replaces old _message_content_cache)
-# These are defined at module level after the lock initialization
-
-async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', max_retries: int = 0, **kwargs):
-    """
-    Safely edit a message with per-chat rate limiting and Retry-After support.
-    Uses leaky bucket algorithm: max 1 msg/sec, max 20-30/min per chat.
-    Respects Telegram's Retry-After header from 429 responses.
-    
-    CRITICAL: Stops editing immediately on 400 Bad Request errors (permanent errors).
-    
-    Args:
-        query: Query object (CallbackQuery or Update)
-        text: Text to send
-        parse_mode: Parse mode (default: 'Markdown')
-        max_retries: Maximum retry attempts (default: 0, no retries)
-        **kwargs: Additional arguments for edit_message_text
-    """
-    # Get rate limiter
+async def safe_edit_message_text(query, text: str, parse_mode: str = 'Markdown', **kwargs):
+    """Safely edit a message with Markdown, falling back to plain text if parsing fails."""
     try:
-        from telegram_rate_limiter import get_telegram_rate_limiter
-        rate_limiter = get_telegram_rate_limiter()
-    except ImportError:
-        rate_limiter = None
-    
-    # Get message ID and chat ID for caching and rate limiting
-    message_id = None
-    chat_id = None
-    is_group = False
-    
-    if hasattr(query, 'message') and query.message:
-        message_id = f"{query.message.chat.id}_{query.message.message_id}"
-        chat_id = query.message.chat.id
-        is_group = query.message.chat.type in ['group', 'supergroup', 'channel']
-    elif hasattr(query, 'effective_message') and query.effective_message:
-        message_id = f"{query.effective_message.chat.id}_{query.effective_message.message_id}"
-        chat_id = query.effective_message.chat.id
-        is_group = query.effective_message.chat.type in ['group', 'supergroup', 'channel']
-    
-    # Early exit if no message ID
-    if not message_id:
-        logger.warning("safe_edit_message_text: No message ID found, skipping edit")
-        return
-    
-    # Use async lock to prevent concurrent edits
-    async with _message_edit_lock:
-        # CRITICAL: Check if this message has failed before (400 errors are permanent)
-        if message_id in _message_edit_failures:
-            if _message_edit_failures[message_id] >= 1:  # Stop after ANY failure
-                # Message has failed - NEVER try to edit again
-                logger.debug(f"Message {message_id} has failed before, skipping edit permanently")
-                return
-        
-        # Check if content is unchanged
-        if message_id in _message_edit_cache:
-            if _message_edit_cache[message_id] == text:
-                return  # Skip unchanged edit
-        
-        # Check if edit is already in progress for this message
-        if message_id in _edit_in_progress and _edit_in_progress[message_id]:
-            logger.debug(f"Edit already in progress for {message_id}, skipping")
-            return
-        
-        # Per-chat rate limiting: Check if this chat can send
-        if rate_limiter and chat_id:
-            if not rate_limiter.can_send_message(chat_id):
-                # Rate limit hit for this chat - skip edit
-                logger.debug(f"Skipping edit for chat {chat_id} due to rate limit")
-                return
-        
-        # Mark as in progress
-        _edit_in_progress[message_id] = True
-    
-        # Check message length (Telegram limit is 4096 chars)
-        if len(text) > 4000:
-            # Truncate and add indicator
-            text = text[:4000] + "\n\n... (message truncated)"
-        
-        # Wait if rate limiter says we need to (per-chat)
-        if rate_limiter and chat_id:
-            await rate_limiter.wait_if_needed(chat_id)
-        
-        try:
-            await query.edit_message_text(text, parse_mode=parse_mode, **kwargs)
-            
-            # Record successful send in rate limiter (per-chat)
-            if rate_limiter and chat_id:
-                rate_limiter.record_message_sent(chat_id)
-            
-            # Cache successful edit
-            _message_edit_cache[message_id] = text
-            _message_edit_times[message_id] = time.time()
-            _message_edit_failures[message_id] = 0  # Reset failure count on success
-            _edit_in_progress[message_id] = False
-            return
-            
-        except RetryAfter as e:
-            # Telegram's RetryAfter exception - has retry_after attribute
-            retry_after = e.retry_after
-            logger.warning(f"[RATE-LIMIT] Rate limit hit on edit_message_text for {message_id} - Retry-After: {retry_after}s")
-            
-            # Record rate limit event for pause/resume management
+        await query.edit_message_text(text, parse_mode=parse_mode, **kwargs)
+    except BadRequest as e:
+        # Handle Markdown parsing errors specifically
+        if 'parse' in str(e).lower() or 'entity' in str(e).lower():
+            # Markdown parsing failed, try with escaped text
             try:
-                from telegram_rate_limit_manager import get_rate_limit_manager
-                rate_limit_mgr = get_rate_limit_manager()
-                if chat_id:
-                    rate_limit_mgr.record_rate_limit(chat_id, retry_after)
-            except Exception as rate_err:
-                logger.warning(f"[RATE-LIMIT] Error recording rate limit: {rate_err}")
-            
-            # Handle rate limit with Retry-After (per-chat) - with jitter
-            if rate_limiter and chat_id:
-                rate_limiter.handle_rate_limit(retry_after=retry_after, chat_id=chat_id)
-            
-            # Mark as failed and stop trying
-            _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
-            _edit_in_progress[message_id] = False
-            return  # DO NOT RETRY - chat is paused via rate limiter
-            
-        except BadRequest as e:
-            error_str = str(e).lower()
-            
-            # Handle 400 Bad Request errors - DO NOT RETRY (these are permanent errors)
-            if '400' in error_str or 'bad request' in error_str:
-                logger.warning(f"400 Bad Request on edit_message_text - PERMANENTLY stopping edits for message {message_id}: {e}")
-                # Mark as permanently failed - NEVER try again
-                _message_edit_failures[message_id] = 999  # Mark as permanently failed
-                _edit_in_progress[message_id] = False
-                return  # DO NOT RETRY, DO NOT SEND NEW MESSAGE
-            
-            # Handle 429 rate limit errors (fallback if RetryAfter exception not caught)
-            if '429' in error_str or 'too many requests' in error_str or 'rate limit' in error_str:
-                logger.warning(f"[RATE-LIMIT] Rate limit hit on edit_message_text for {message_id} (BadRequest)")
-                
-                # Try to extract Retry-After from error message
-                retry_after = None
-                try:
-                    if 'retry_after' in error_str:
-                        import re
-                        match = re.search(r'retry_after[:\s]+(\d+)', error_str)
-                        if match:
-                            retry_after = int(match.group(1))
-                except Exception as parse_error:
-                    logger.debug(f"Could not parse retry_after: {parse_error}")
-                
-                # Record rate limit event for pause/resume management
-                try:
-                    from telegram_rate_limit_manager import get_rate_limit_manager
-                    rate_limit_mgr = get_rate_limit_manager()
-                    if chat_id:
-                        rate_limit_mgr.record_rate_limit(chat_id, retry_after)
-                except Exception as rate_err:
-                    logger.warning(f"[RATE-LIMIT] Error recording rate limit: {rate_err}")
-                
-                # Handle rate limit with Retry-After (per-chat)
-                if rate_limiter and chat_id:
-                    rate_limiter.handle_rate_limit(retry_after=retry_after, chat_id=chat_id)
-                
-                # Mark as failed and stop trying
-                _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
-                _edit_in_progress[message_id] = False
-                return  # DO NOT RETRY
-            
-            # Handle other BadRequest errors
-            logger.warning(f"BadRequest error editing message {message_id}: {e}")
-            _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
-            _edit_in_progress[message_id] = False
-            return  # DO NOT RETRY
-            
-        except TimedOut as e:
-            # Handle timeout errors
-            logger.warning(f"Timeout on edit_message_text for {message_id}: {e}")
-            if rate_limiter and chat_id:
-                rate_limiter.handle_timeout(e, chat_id=chat_id)
-            _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
-            _edit_in_progress[message_id] = False
-            return  # DO NOT RETRY
-            
-        except Exception as e:
-            # Handle any other unexpected errors
-            logger.error(f"Unexpected error in safe_edit_message_text for {message_id}: {e}", exc_info=True)
-            if message_id:
-                _message_edit_failures[message_id] = (_message_edit_failures.get(message_id, 0) + 1)
-                _edit_in_progress[message_id] = False
-            return  # DO NOT RETRY, DO NOT FALLBACK
-    
-    # If all retries failed, log but don't raise
-    if last_error:
-        logger.warning(f"Could not edit message after {max_retries} attempts: {last_error}")
+                escaped_text = escape_markdown(text)
+                await query.edit_message_text(escaped_text, parse_mode=parse_mode, **kwargs)
+            except Exception:
+                # If escaping also fails, send as plain text
+                await query.edit_message_text(text, parse_mode=None, **kwargs)
+        else:
+            # Re-raise if it's a different BadRequest error
+            raise
 
 
 class TelegramUI:
@@ -1193,7 +991,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
                             for i, chunk in enumerate(chunks):
                                 if i == 0:
-                                    await safe_edit_message_text(query, chunk[:4000], parse_mode='Markdown')
+                                    await query.edit_message_text(chunk[:4000], parse_mode='Markdown')
                                 else:
                                     await query.message.reply_text(chunk[:4000], parse_mode='Markdown')
                             return
@@ -1231,11 +1029,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         for i, chunk in enumerate(chunks):
                             chunk_keyboard = keyboard if i == len(chunks) - 1 else None
                             if i == 0:
-                                await safe_edit_message_text(query, chunk[:4000], parse_mode='Markdown', reply_markup=chunk_keyboard)
+                                await query.edit_message_text(chunk[:4000], parse_mode='Markdown', reply_markup=chunk_keyboard)
                             else:
                                 await query.message.reply_text(chunk[:4000], parse_mode='Markdown', reply_markup=chunk_keyboard)
                     else:
-                        await safe_edit_message_text(query, text[:4000], parse_mode='Markdown', reply_markup=keyboard)
+                        await query.edit_message_text(text[:4000], parse_mode='Markdown', reply_markup=keyboard)
                 except Exception as e:
                     logger.error(f"Error handling scan result callback: {e}", exc_info=True)
                     await query.answer(f"Error: {str(e)[:50]}", show_alert=True)
@@ -1252,8 +1050,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             original_message = plan_data.get('original_message')
             # Proceed with execution
             await query.answer("✅ Plan approved! Executing...", show_alert=False)
-            await safe_edit_message_text(
-                query,
+            await query.edit_message_text(
                 f"✅ **Plan Approved**\n\nExecuting plan...\n\n{plan_data.get('plan_text', '')[:3000]}",
                 parse_mode='Markdown',
                 reply_markup=create_mode_keyboard(user_id, context)
@@ -1271,8 +1068,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data and pending_key in context.user_data:
             del context.user_data[pending_key]
         await query.answer("❌ Plan cancelled", show_alert=False)
-        await safe_edit_message_text(
-            query,
+        await query.edit_message_text(
             "❌ **Plan Cancelled**\n\nExecution stopped.",
             parse_mode='Markdown',
             reply_markup=create_mode_keyboard(user_id, context)
@@ -1401,7 +1197,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await safe_edit_message_text(query, welcome_message, parse_mode='Markdown', reply_markup=reply_markup)
+        await query.edit_message_text(welcome_message, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "menu_status":
@@ -1503,7 +1299,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")
         ])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await safe_edit_message_text(query, status_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await query.edit_message_text(status_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "menu_plans":
@@ -1546,7 +1342,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await safe_edit_message_text(query, plans_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await query.edit_message_text(plans_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "menu_referral":
@@ -1588,7 +1384,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await safe_edit_message_text(query, referral_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await query.edit_message_text(referral_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "menu_new":
@@ -1639,7 +1435,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         keyboard.append(get_support_button_row())
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await safe_edit_message_text(query, help_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await query.edit_message_text(help_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "menu_subscribe":
@@ -1681,7 +1477,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await safe_edit_message_text(query, plans_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await query.edit_message_text(plans_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data.startswith("copy_code_"):
@@ -1814,8 +1610,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await safe_edit_message_text(
-            query,
+        await query.edit_message_text(
             payment_text,
             parse_mode='Markdown',
             reply_markup=reply_markup
@@ -1861,7 +1656,7 @@ Or use command: /admin_upgrade USER_ID DURATION
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await safe_edit_message_text(query, upgrade_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await query.edit_message_text(upgrade_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "admin_upgrade_help":
@@ -1908,7 +1703,7 @@ Or use command: /admin_upgrade USER_ID DURATION
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await safe_edit_message_text(query, help_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await query.edit_message_text(help_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     elif data == "admin_users":
@@ -2215,7 +2010,7 @@ Or use command: /admin_upgrade USER_ID DURATION
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await safe_edit_message_text(query, duration_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await query.edit_message_text(duration_text, parse_mode='Markdown', reply_markup=reply_markup)
         return
     
     # Handle duration selection - show request count options
@@ -2337,7 +2132,7 @@ Or use command: /admin_upgrade USER_ID DURATION
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await safe_edit_message_text(query, requests_text, parse_mode='Markdown', reply_markup=reply_markup)
+            await query.edit_message_text(requests_text, parse_mode='Markdown', reply_markup=reply_markup)
             return
             
         except (ValueError, IndexError) as e:
@@ -2420,7 +2215,7 @@ Or use command: /admin_upgrade USER_ID DURATION
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await safe_edit_message_text(query, custom_text, parse_mode='Markdown', reply_markup=reply_markup)
+            await query.edit_message_text(custom_text, parse_mode='Markdown', reply_markup=reply_markup)
             
             # Store the pending upgrade in context for message handler
             context.user_data[f'pending_upgrade_{user_id}'] = {
@@ -2668,7 +2463,7 @@ Subscription will expire automatically.{admin_notice}
                 [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await safe_edit_message_text(query, success_text, parse_mode='Markdown', reply_markup=reply_markup)
+            await query.edit_message_text(success_text, parse_mode='Markdown', reply_markup=reply_markup)
             
         except ValueError as e:
             logger.error(f"ValueError in upgrade callback: {e}, data: {data}", exc_info=True)
@@ -2755,7 +2550,7 @@ Subscription will expire automatically.{admin_notice}
                 payments_text = payments_text[:3900] + "\n\n... (message truncated)"
             
             # Send without parse_mode to avoid Markdown parsing errors
-            await safe_edit_message_text(query, payments_text, reply_markup=reply_markup)
+            await query.edit_message_text(payments_text, reply_markup=reply_markup)
         except Exception as e:
             logger.error(f"Error showing payments: {e}", exc_info=True)
             error_msg = f"❌ Error loading payments: {str(e)}"
@@ -2797,7 +2592,7 @@ Subscription will expire automatically.{admin_notice}
             [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await safe_edit_message_text(query, subs_text, reply_markup=reply_markup)
+        await query.edit_message_text(subs_text, reply_markup=reply_markup)
         return
     
     elif data == "admin_stats":
@@ -2891,7 +2686,7 @@ Subscription will expire automatically.{admin_notice}
                 [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await safe_edit_message_text(query, stats_text, parse_mode='Markdown', reply_markup=reply_markup)
+            await query.edit_message_text(stats_text, parse_mode='Markdown', reply_markup=reply_markup)
         except Exception as e:
             logger.error(f"Error showing statistics: {e}", exc_info=True)
             error_msg = f"❌ Error: {str(e)[:100]}"  # Limit error message length
@@ -2935,7 +2730,7 @@ Subscription will expire automatically.{admin_notice}
                 [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await safe_edit_message_text(query, dashboard_text, parse_mode='Markdown', reply_markup=reply_markup)
+            await query.edit_message_text(dashboard_text, parse_mode='Markdown', reply_markup=reply_markup)
         except Exception as e:
             logger.error(f"Error showing dashboard: {e}", exc_info=True)
             await query.answer(f"❌ Error: {str(e)}", show_alert=True)
@@ -3270,1245 +3065,6 @@ async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(message, parse_mode='Markdown')
 
 
-# ==================== Document Generation Commands ====================
-
-async def generate_document_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /generate_document command"""
-    user_id = update.effective_user.id
-    user_message = ' '.join(context.args) if context.args else None
-    
-    if not user_message:
-        await update.message.reply_text(
-            "📄 *Document Generator*\n\n"
-            "Usage: `/generate_document [type] [content]`\n"
-            "Types: `pdf`, `word`, `excel`\n\n"
-            "Example: `/generate_document pdf This is my document content`",
-            parse_mode='Markdown'
-        )
-        return
-    
-    try:
-        from document_generator import get_document_generator
-        
-        doc_gen = get_document_generator()
-        
-        # Parse type and content
-        parts = user_message.split(' ', 1)
-        doc_type = parts[0].lower() if len(parts) > 1 else 'pdf'
-        content = parts[1] if len(parts) > 1 else user_message
-        
-        # Generate document
-        if doc_type == 'pdf':
-            filepath = doc_gen.generate_pdf(content, title="Generated Document")
-        elif doc_type == 'word' or doc_type == 'docx':
-            filepath = doc_gen.generate_word(content, title="Generated Document")
-        elif doc_type == 'excel' or doc_type == 'xlsx':
-            # For Excel, convert content to table format
-            rows = [[cell] for cell in content.split('\n')]
-            filepath = doc_gen.generate_excel(rows)
-        else:
-            await update.message.reply_text(f"❌ Unknown document type: {doc_type}")
-            return
-        
-        if filepath and Path(filepath).exists():
-            # Verify file is not empty
-            file_size = Path(filepath).stat().st_size
-            if file_size == 0:
-                await update.message.reply_text("❌ Generated document is empty. Please try again.")
-                return
-            
-            with open(filepath, 'rb') as f:
-                await update.message.reply_document(document=f, filename=Path(filepath).name)
-            logger.info(f"Sent generated document: {filepath} (size: {file_size} bytes)")
-        else:
-            await update.message.reply_text("❌ Failed to generate document")
-            
-    except Exception as e:
-        logger.error(f"Error generating document: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def generate_pdf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /generate_pdf command"""
-    user_message = ' '.join(context.args) if context.args else None
-    
-    if not user_message:
-        await update.message.reply_text("Usage: `/generate_pdf [content]`", parse_mode='Markdown')
-        return
-    
-    try:
-        from document_generator import get_document_generator
-        doc_gen = get_document_generator()
-        filepath = doc_gen.generate_pdf(user_message, title="Generated PDF")
-        
-        if filepath and Path(filepath).exists():
-            file_size = Path(filepath).stat().st_size
-            if file_size == 0:
-                await update.message.reply_text("❌ Generated PDF is empty. Please try again.")
-                return
-            with open(filepath, 'rb') as f:
-                await update.message.reply_document(document=f, filename=Path(filepath).name)
-            logger.info(f"Sent generated PDF: {filepath} (size: {file_size} bytes)")
-        else:
-            await update.message.reply_text("❌ Failed to generate PDF")
-    except Exception as e:
-        logger.error(f"Error generating PDF: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def generate_word_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /generate_word command"""
-    user_message = ' '.join(context.args) if context.args else None
-    
-    if not user_message:
-        await update.message.reply_text("Usage: `/generate_word [content]`", parse_mode='Markdown')
-        return
-    
-    try:
-        from document_generator import get_document_generator
-        doc_gen = get_document_generator()
-        filepath = doc_gen.generate_word(user_message, title="Generated Document")
-        
-        if filepath and Path(filepath).exists():
-            file_size = Path(filepath).stat().st_size
-            if file_size == 0:
-                await update.message.reply_text("❌ Generated Word document is empty. Please try again.")
-                return
-            with open(filepath, 'rb') as f:
-                await update.message.reply_document(document=f, filename=Path(filepath).name)
-            logger.info(f"Sent generated Word document: {filepath} (size: {file_size} bytes)")
-        else:
-            await update.message.reply_text("❌ Failed to generate Word document")
-    except Exception as e:
-        logger.error(f"Error generating Word document: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def generate_excel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /generate_excel command"""
-    user_message = ' '.join(context.args) if context.args else None
-    
-    if not user_message:
-        await update.message.reply_text("Usage: `/generate_excel [data]`\nFormat: Each line is a row, comma-separated values", parse_mode='Markdown')
-        return
-    
-    try:
-        from document_generator import get_document_generator
-        doc_gen = get_document_generator()
-        
-        # Parse CSV-like data
-        rows = [line.split(',') for line in user_message.split('\n') if line.strip()]
-        filepath = doc_gen.generate_excel(rows)
-        
-        if filepath and Path(filepath).exists():
-            file_size = Path(filepath).stat().st_size
-            if file_size == 0:
-                await update.message.reply_text("❌ Generated Excel spreadsheet is empty. Please try again.")
-                return
-            with open(filepath, 'rb') as f:
-                await update.message.reply_document(document=f, filename=Path(filepath).name)
-            logger.info(f"Sent generated Excel spreadsheet: {filepath} (size: {file_size} bytes)")
-        else:
-            await update.message.reply_text("❌ Failed to generate Excel spreadsheet")
-    except Exception as e:
-        logger.error(f"Error generating Excel: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def generate_qr_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /generate_qr command"""
-    data = ' '.join(context.args) if context.args else None
-    
-    if not data:
-        await update.message.reply_text(
-            "📱 *QR Code Generator*\n\n"
-            "Usage: `/generate_qr [data]`\n\n"
-            "Example: `/generate_qr https://example.com`\n"
-            "Example: `/generate_qr Hello World`",
-            parse_mode='Markdown'
-        )
-        return
-    
-    try:
-        from document_generator import get_document_generator
-        
-        await update.message.reply_text("📱 Generating QR code...")
-        
-        doc_gen = get_document_generator()
-        filepath = doc_gen.generate_qr_code(data)
-        
-        if filepath:
-            with open(filepath, 'rb') as f:
-                await update.message.reply_photo(photo=f, caption=f"📱 QR Code: `{data[:50]}`", parse_mode='Markdown')
-        else:
-            await update.message.reply_text("❌ Failed to generate QR code")
-            
-    except Exception as e:
-        logger.error(f"Error generating QR code: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def generate_barcode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /generate_barcode command"""
-    args = context.args
-    
-    if not args or len(args) < 1:
-        await update.message.reply_text(
-            "📊 *Barcode Generator*\n\n"
-            "Usage: `/generate_barcode [data] [type]`\n\n"
-            "Types: `code128`, `code39`, `ean13`, `ean8`, `upc`, `isbn10`, `isbn13`\n\n"
-            "Example: `/generate_barcode 1234567890 code128`\n"
-            "Example: `/generate_barcode 9781234567890 isbn13`",
-            parse_mode='Markdown'
-        )
-        return
-    
-    try:
-        from document_generator import get_document_generator
-        
-        data = args[0]
-        barcode_type = args[1] if len(args) > 1 else 'code128'
-        
-        await update.message.reply_text(f"📊 Generating {barcode_type} barcode...")
-        
-        doc_gen = get_document_generator()
-        filepath = doc_gen.generate_barcode(data, barcode_type=barcode_type)
-        
-        if filepath:
-            with open(filepath, 'rb') as f:
-                await update.message.reply_photo(photo=f, caption=f"📊 Barcode ({barcode_type}): `{data}`", parse_mode='Markdown')
-        else:
-            await update.message.reply_text("❌ Failed to generate barcode")
-            
-    except Exception as e:
-        logger.error(f"Error generating barcode: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-# ==================== Template Management Commands ====================
-
-async def save_template_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /save_template command"""
-    user_id = update.effective_user.id
-    args = context.args
-    
-    if not args or len(args) < 2:
-        await update.message.reply_text(
-            "💾 *Save Template*\n\n"
-            "Usage: `/save_template [name] [type] [category]`\n"
-            "Types: `pdf`, `word`, `excel`\n\n"
-            "Example: `/save_template invoice_template pdf invoice`",
-            parse_mode='Markdown'
-        )
-        return
-    
-    try:
-        from template_manager import get_template_manager
-        template_mgr = get_template_manager(db)
-        
-        name = args[0]
-        template_type = args[1] if len(args) > 1 else 'pdf'
-        category = args[2] if len(args) > 2 else None
-        
-        # Get last generated document (would need to track this)
-        # For now, create a basic template
-        template_data = {
-            'content': 'Template content',
-            'options': {}
-        }
-        
-        template_id = template_mgr.save_template(
-            user_id=user_id,
-            name=name,
-            template_type=template_type,
-            template_data=template_data,
-            category=category
-        )
-        
-        if template_id:
-            await update.message.reply_text(f"✅ Template saved: `{name}` (ID: {template_id})", parse_mode='Markdown')
-        else:
-            await update.message.reply_text("❌ Failed to save template")
-            
-    except Exception as e:
-        logger.error(f"Error saving template: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def use_template_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /use_template command"""
-    user_id = update.effective_user.id
-    template_name = ' '.join(context.args) if context.args else None
-    
-    if not template_name:
-        await update.message.reply_text("Usage: `/use_template [template_name]`", parse_mode='Markdown')
-        return
-    
-    try:
-        from template_manager import get_template_manager
-        from document_generator import get_document_generator
-        
-        template_mgr = get_template_manager(db)
-        template = template_mgr.get_template(name=template_name, user_id=user_id)
-        
-        if not template:
-            await update.message.reply_text(f"❌ Template not found: `{template_name}`", parse_mode='Markdown')
-            return
-        
-        # Process template if it's a PSD file
-        template_file_path = template.get('template_data', {}).get('file_path')
-        if template_file_path and Path(template_file_path).exists():
-            try:
-                from template_processor import get_template_processor
-                processor = get_template_processor()
-                processed_info = processor.process_template(template_file_path, template_name)
-                if processed_info:
-                    await update.message.reply_text(
-                        f"✅ Template processed!\n"
-                        f"📊 Layers: {processed_info.get('layer_count', 0)}\n"
-                        f"📝 Text fields: {processed_info.get('text_layer_count', 0)}",
-                        parse_mode='Markdown'
-                    )
-            except Exception as e:
-                logger.warning(f"Could not process template: {e}")
-        
-        # Check if this is an ID template request with photo
-        template_data = template.get('template_data', {})
-        template_file_path = template_data.get('file_path')
-        
-        # Check if user uploaded a photo (in context)
-        user_photo = None
-        if context.user_data.get('last_photo'):
-            user_photo = context.user_data.get('last_photo')
-        
-        # If it's an ID template and we have a photo, use ID processor
-        if template_name and 'id' in template_name.lower() and user_photo:
-            try:
-                from id_template_processor import get_id_processor
-                id_processor = get_id_processor()
-                
-                # Extract user data from message if provided
-                user_data = {}
-                message_text = update.message.text or ""
-                if message_text:
-                    # Try to extract data from message
-                    import re
-                    if 'name' in message_text.lower():
-                        name_match = re.search(r'name[:\s]+([^\n,]+)', message_text, re.I)
-                        if name_match:
-                            user_data['name'] = name_match.group(1).strip()
-                
-                filepath = id_processor.process_texas_id_with_photo(
-                    user_photo,
-                    template_name=template_name,
-                    user_data=user_data
-                )
-            except Exception as e:
-                logger.warning(f"ID processor not available, using document generator: {e}")
-                filepath = None
-        else:
-            # Use regular document generator
-            doc_gen = get_document_generator()
-            filepath = doc_gen.generate_from_template(
-                template['template_data'],
-                doc_type=template['type'],
-                variables={},  # Can be enhanced to accept variables
-                template_name=template_name
-            )
-        
-        if filepath and Path(filepath).exists():
-            # Verify file is not empty
-            file_size = Path(filepath).stat().st_size
-            if file_size == 0:
-                await update.message.reply_text("❌ Generated file is empty. Please try again.")
-                return
-            
-            # Determine file type and send appropriately
-            file_ext = Path(filepath).suffix.lower()
-            if file_ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']:
-                # Send images as photos
-                with open(filepath, 'rb') as f:
-                    await update.message.reply_photo(photo=f, caption="✅ Generated from template")
-            else:
-                # Send documents as documents
-                with open(filepath, 'rb') as f:
-                    await update.message.reply_document(document=f, filename=Path(filepath).name)
-            logger.info(f"Sent generated file: {filepath} (size: {file_size} bytes)")
-        else:
-            await update.message.reply_text("❌ Failed to generate document from template")
-            
-    except Exception as e:
-        logger.error(f"Error using template: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def list_templates_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /list_templates command"""
-    user_id = update.effective_user.id
-    
-    try:
-        from template_manager import get_template_manager
-        template_mgr = get_template_manager(db)
-        templates = template_mgr.list_templates(user_id=user_id)
-        
-        if not templates:
-            await update.message.reply_text("📋 No templates found. Use `/save_template` to create one.", parse_mode='Markdown')
-            return
-        
-        message = "📋 *Your Templates:*\n\n"
-        for template in templates:
-            scope = "🌐 Global" if template['is_global'] else "👤 Personal"
-            message += f"• `{template['name']}` ({template['type']}) - {scope}\n"
-            if template.get('description'):
-                message += f"  _{template['description']}_\n"
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
-        
-    except Exception as e:
-        logger.error(f"Error listing templates: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def delete_template_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /delete_template command"""
-    user_id = update.effective_user.id
-    template_name = ' '.join(context.args) if context.args else None
-    
-    if not template_name:
-        await update.message.reply_text("Usage: `/delete_template [template_name]`", parse_mode='Markdown')
-        return
-    
-    try:
-        from template_manager import get_template_manager
-        template_mgr = get_template_manager(db)
-        
-        template = template_mgr.get_template(name=template_name, user_id=user_id)
-        if not template:
-            await update.message.reply_text(f"❌ Template not found: `{template_name}`", parse_mode='Markdown')
-            return
-        
-        if template_mgr.delete_template(template['id'], user_id=user_id):
-            await update.message.reply_text(f"✅ Template deleted: `{template_name}`", parse_mode='Markdown')
-        else:
-            await update.message.reply_text("❌ Failed to delete template (check permissions)")
-            
-    except Exception as e:
-        logger.error(f"Error deleting template: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def download_template_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /download_template command - Download template from MediaFire or URL"""
-    user_id = update.effective_user.id
-    args = context.args
-    
-    if not args or len(args) < 1:
-        await update.message.reply_text(
-            "📥 *Download Template*\n\n"
-            "Usage: `/download_template [url] [name]`\n\n"
-            "Supports:\n"
-            "• MediaFire links\n"
-            "• Direct download URLs\n\n"
-            "Example: `/download_template https://www.mediafire.com/file/.../texas_dl.rar texas_dl`",
-            parse_mode='Markdown'
-        )
-        return
-    
-    url = args[0]
-    template_name = args[1] if len(args) > 1 else None
-    
-    try:
-        from template_downloader import get_template_downloader
-        
-        await update.message.reply_text("📥 Downloading template... This may take a moment.")
-        
-        downloader = get_template_downloader()
-        
-        # Determine source and download
-        if 'mediafire.com' in url.lower():
-            file_path = downloader.download_from_mediafire(url, template_name)
-        elif 'mega.nz' in url.lower():
-            file_path = downloader.download_from_mega(url, template_name)
-        else:
-            # Direct URL download (basic support)
-            await update.message.reply_text("📥 Downloading from direct URL...")
-            try:
-                import requests
-                response = requests.get(url, stream=True, timeout=300)
-                response.raise_for_status()
-                
-                if not template_name:
-                    # Extract filename from URL or Content-Disposition
-                    content_disposition = response.headers.get('Content-Disposition', '')
-                    if 'filename=' in content_disposition:
-                        template_name = content_disposition.split('filename=')[1].strip('"\'')
-                    else:
-                        import time
-                template_name = url.split('/')[-1].split('?')[0] or f"template_{int(time.time())}"
-                
-                file_ext = Path(template_name).suffix.lower()
-                if file_ext == '.psd':
-                    save_path = downloader.psd_dir / template_name
-                else:
-                    save_path = downloader.templates_dir / template_name
-                
-                with open(save_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                
-                file_path = str(save_path)
-            except Exception as e:
-                logger.error(f"Error downloading from URL: {e}")
-                await update.message.reply_text(f"❌ Failed to download from URL: {str(e)}")
-                return
-        
-        if file_path:
-            # Process template for AI use (extract PSD layers, etc.)
-            template_processed = False
-            try:
-                from template_processor import get_template_processor
-                processor = get_template_processor()
-                processed_info = processor.process_template(file_path, template_name)
-                if processed_info:
-                    template_processed = True
-                    await update.message.reply_text(
-                        f"🔧 Processing template...\n"
-                        f"📊 Extracted {processed_info.get('layer_count', 0)} layers\n"
-                        f"📝 Found {processed_info.get('text_layer_count', 0)} editable text fields",
-                        parse_mode='Markdown'
-                    )
-            except Exception as e:
-                logger.warning(f"Could not process template: {e}")
-            
-            # Save to template database
-            from template_manager import get_template_manager
-            template_mgr = get_template_manager(db)
-            
-            # Determine template type from file extension
-            file_ext = Path(file_path).suffix.lower() if file_path else None
-            if file_ext == '.psd':
-                template_type = 'psd'
-            elif file_ext == '.pdf':
-                template_type = 'pdf'
-            elif file_ext in ['.rar', '.zip']:
-                template_type = 'archive'
-            else:
-                template_type = 'other'
-            
-            # Determine source
-            if 'mediafire.com' in url.lower():
-                source = 'mediafire'
-            elif 'mega.nz' in url.lower():
-                source = 'mega'
-            else:
-                source = 'direct'
-            
-            final_template_name = template_name or (Path(file_path).stem if file_path else f"template_{int(time.time())}")
-            
-            template_id = template_mgr.save_template(
-                user_id=user_id,
-                name=final_template_name,
-                template_type=template_type,
-                template_data={'file_path': file_path, 'source_url': url, 'source': source, 'processed': template_processed},
-                category='downloaded',
-                description=f"Downloaded from {source}" + (" (Processed for AI)" if template_processed else ""),
-                source_url=url,
-                file_path=file_path
-            )
-            
-            if template_id:
-                status_msg = f"✅ Template downloaded and saved!\n\n"
-                status_msg += f"📁 File: `{Path(file_path).name}`\n"
-                status_msg += f"💾 Template ID: `{template_id}`\n"
-                if template_processed:
-                    status_msg += f"🤖 AI-ready: Template processed and ready for generation\n"
-                status_msg += f"📋 Use with: `/use_template {final_template_name}`"
-                
-                await update.message.reply_text(status_msg, parse_mode='Markdown')
-            else:
-                await update.message.reply_text(
-                    f"✅ Template downloaded: `{file_path}`\n\n"
-                    f"⚠️ Could not save to database, but file is available.",
-                    parse_mode='Markdown'
-                )
-        else:
-            await update.message.reply_text("❌ Failed to download template. Check the URL and try again.")
-            
-    except Exception as e:
-        logger.error(f"Error downloading template: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-# ==================== Image Generation Commands ====================
-
-async def generate_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /generate_image command"""
-    prompt = ' '.join(context.args) if context.args else None
-    
-    if not prompt:
-        await update.message.reply_text(
-            "🎨 *Image Generator*\n\n"
-            "Usage: `/generate_image [prompt]`\n\n"
-            "Example: `/generate_image a beautiful sunset over mountains`",
-            parse_mode='Markdown'
-        )
-        return
-    
-    try:
-        from image_generator import get_image_generator
-        
-        await update.message.reply_text("🎨 Generating image... This may take a moment.")
-        
-        img_gen = get_image_generator()
-        filepath = img_gen.generate_image(prompt)
-        
-        if filepath:
-            with open(filepath, 'rb') as f:
-                await update.message.reply_photo(photo=f)
-        else:
-            await update.message.reply_text("❌ Failed to generate image")
-            
-    except Exception as e:
-        logger.error(f"Error generating image: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-# ==================== Image Editing Commands ====================
-
-async def edit_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /edit_image command"""
-    await update.message.reply_text(
-        "🖼️ *Image Editor*\n\n"
-        "Upload an image and use one of these commands:\n"
-        "• `/add_text [text]` - Add text overlay\n"
-        "• `/apply_filter [type]` - Apply filter (blur, sharpen, etc.)\n"
-        "• `/crop [x1,y1,x2,y2]` - Crop image\n"
-        "• `/rotate [angle]` - Rotate image\n"
-        "• `/resize [width]x[height]` - Resize image",
-        parse_mode='Markdown'
-    )
-
-
-# ==================== Face Swap Commands ====================
-
-# Service Management Commands
-async def start_service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start_service command"""
-    user_id = update.effective_user.id
-    
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage: /start_service [name] [command]\n\n"
-            "Example: /start_service evilginx './evilginx -p phishlets/'"
-        )
-        return
-    
-    service_name = context.args[0]
-    command = ' '.join(context.args[1:])
-    
-    try:
-        from service_manager import get_service_manager
-        from user_workspace_manager import UserWorkspaceManager
-        
-        workspace_manager = UserWorkspaceManager.get_instance()
-        user_workspace = workspace_manager.get_user_workspace(user_id)
-        
-        service_mgr = get_service_manager(str(user_workspace))
-        service_info = service_mgr.start_service(service_name, command, str(user_workspace), user_id)
-        
-        # Save to database
-        db.save_service(
-            user_id=user_id,
-            service_name=service_name,
-            command=command,
-            workspace_path=str(user_workspace),
-            pid=service_info.get('pid'),
-            status=service_info.get('status', 'running'),
-            metadata=service_info.get('metadata', {})
-        )
-        
-        if service_info.get('status') == 'running':
-            await update.message.reply_text(
-                f"✅ Service `{service_name}` started successfully\n\n"
-                f"PID: `{service_info.get('pid')}`\n"
-                f"Status: `{service_info.get('status')}`\n"
-                f"Logs: `{service_info.get('log_file', 'N/A')}`",
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text(
-                f"❌ Failed to start service `{service_name}`\n\n"
-                f"Error: {service_info.get('message', 'Unknown error')}",
-                parse_mode='Markdown'
-            )
-    except Exception as e:
-        logger.error(f"Error in start_service_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def stop_service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /stop_service command"""
-    user_id = update.effective_user.id
-    
-    if not context.args:
-        await update.message.reply_text("Usage: /stop_service [name]")
-        return
-    
-    service_name = context.args[0]
-    
-    try:
-        from service_manager import get_service_manager
-        from user_workspace_manager import UserWorkspaceManager
-        
-        workspace_manager = UserWorkspaceManager.get_instance()
-        user_workspace = workspace_manager.get_user_workspace(user_id)
-        
-        service_mgr = get_service_manager(str(user_workspace))
-        service = db.get_service(user_id, service_name)
-        
-        if not service:
-            await update.message.reply_text(f"❌ Service `{service_name}` not found", parse_mode='Markdown')
-            return
-        
-        pid = service.get('pid')
-        success = service_mgr.stop_service(service_name, user_id, pid)
-        
-        if success:
-            db.update_service_status(user_id, service_name, 'stopped')
-            await update.message.reply_text(f"✅ Service `{service_name}` stopped", parse_mode='Markdown')
-        else:
-            await update.message.reply_text(f"❌ Failed to stop service `{service_name}`", parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error in stop_service_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def list_services_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /list_services command"""
-    user_id = update.effective_user.id
-    
-    try:
-        services = db.list_user_services(user_id)
-        
-        if not services:
-            await update.message.reply_text("No services found")
-            return
-        
-        message = "📋 *Your Services*\n\n"
-        for service in services:
-            status_emoji = "🟢" if service.get('status') == 'running' else "🔴"
-            message += f"{status_emoji} *{service.get('service_name')}*\n"
-            message += f"Status: `{service.get('status')}`\n"
-            if service.get('pid'):
-                message += f"PID: `{service.get('pid')}`\n"
-            message += f"Started: `{service.get('started_at', 'N/A')}`\n\n"
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error in list_services_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def service_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /service_status command"""
-    user_id = update.effective_user.id
-    
-    if not context.args:
-        await update.message.reply_text("Usage: /service_status [name]")
-        return
-    
-    service_name = context.args[0]
-    
-    try:
-        from service_manager import get_service_manager
-        from user_workspace_manager import UserWorkspaceManager
-        
-        workspace_manager = UserWorkspaceManager.get_instance()
-        user_workspace = workspace_manager.get_user_workspace(user_id)
-        
-        service_mgr = get_service_manager(str(user_workspace))
-        service = db.get_service(user_id, service_name)
-        
-        if not service:
-            await update.message.reply_text(f"❌ Service `{service_name}` not found", parse_mode='Markdown')
-            return
-        
-        pid = service.get('pid')
-        status = service_mgr.get_service_status(service_name, user_id, pid)
-        
-        message = f"📊 *Service Status: {service_name}*\n\n"
-        message += f"Status: `{status.get('status')}`\n"
-        message += f"Running: `{status.get('running')}`\n"
-        if status.get('pid'):
-            message += f"PID: `{status.get('pid')}`\n"
-            message += f"CPU: `{status.get('cpu_percent', 0):.1f}%`\n"
-            message += f"Memory: `{status.get('memory_mb', 0):.1f} MB`\n"
-            message += f"Uptime: `{status.get('uptime_seconds', 0)}s`\n"
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error in service_status_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def service_logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /service_logs command"""
-    user_id = update.effective_user.id
-    
-    if not context.args:
-        await update.message.reply_text("Usage: /service_logs [name] [lines]")
-        return
-    
-    service_name = context.args[0]
-    lines = int(context.args[1]) if len(context.args) > 1 else 50
-    
-    try:
-        from service_manager import get_service_manager
-        from user_workspace_manager import UserWorkspaceManager
-        
-        workspace_manager = UserWorkspaceManager.get_instance()
-        user_workspace = workspace_manager.get_user_workspace(user_id)
-        
-        service_mgr = get_service_manager(str(user_workspace))
-        logs = service_mgr.get_service_logs(service_name, user_id, lines)
-        
-        if len(logs) > 4000:
-            logs = logs[-4000:] + "\n... (truncated)"
-        
-        await update.message.reply_text(f"📄 *Logs for {service_name}*\n\n```\n{logs}\n```", parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error in service_logs_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-# Project Management Commands
-async def save_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /save_project command"""
-    user_id = update.effective_user.id
-    
-    if not context.args:
-        await update.message.reply_text("Usage: /save_project [name]")
-        return
-    
-    project_name = context.args[0]
-    
-    try:
-        from project_persistence import get_project_persistence
-        from user_workspace_manager import UserWorkspaceManager
-        
-        workspace_manager = UserWorkspaceManager.get_instance()
-        user_workspace = workspace_manager.get_user_workspace(user_id)
-        
-        persistence = get_project_persistence(db)
-        success = persistence.save_project(user_id, project_name, str(user_workspace))
-        
-        if success:
-            await update.message.reply_text(f"✅ Project `{project_name}` saved successfully", parse_mode='Markdown')
-        else:
-            await update.message.reply_text(f"❌ Failed to save project `{project_name}`", parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error in save_project_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def restore_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /restore_project command"""
-    user_id = update.effective_user.id
-    
-    if not context.args:
-        await update.message.reply_text("Usage: /restore_project [name]")
-        return
-    
-    project_name = context.args[0]
-    
-    try:
-        from project_persistence import get_project_persistence
-        from user_workspace_manager import UserWorkspaceManager
-        
-        workspace_manager = UserWorkspaceManager.get_instance()
-        user_workspace = workspace_manager.get_user_workspace(user_id)
-        
-        persistence = get_project_persistence(db)
-        success = persistence.restore_project(user_id, project_name, str(user_workspace))
-        
-        if success:
-            await update.message.reply_text(f"✅ Project `{project_name}` restored successfully", parse_mode='Markdown')
-        else:
-            await update.message.reply_text(f"❌ Failed to restore project `{project_name}`", parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error in restore_project_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def list_projects_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /list_projects command"""
-    user_id = update.effective_user.id
-    
-    try:
-        from project_persistence import get_project_persistence
-        persistence = get_project_persistence(db)
-        projects = persistence.list_projects(user_id)
-        
-        if not projects:
-            await update.message.reply_text("No saved projects found")
-            return
-        
-        message = "📋 *Your Saved Projects*\n\n"
-        for project in projects:
-            metadata = project.get('metadata', {})
-            if isinstance(metadata, str):
-                import json
-                try:
-                    metadata = json.loads(metadata)
-                except:
-                    metadata = {}
-            
-            message += f"📁 *{project.get('project_name')}*\n"
-            message += f"Type: `{metadata.get('project_type', 'unknown')}`\n"
-            message += f"Files: `{metadata.get('file_count', 0)}`\n"
-            message += f"Saved: `{project.get('created_at', 'N/A')}`\n\n"
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error in list_projects_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def delete_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /delete_project command"""
-    user_id = update.effective_user.id
-    
-    if not context.args:
-        await update.message.reply_text("Usage: /delete_project [name]")
-        return
-    
-    project_name = context.args[0]
-    
-    try:
-        from project_persistence import get_project_persistence
-        persistence = get_project_persistence(db)
-        success = persistence.delete_project(user_id, project_name)
-        
-        if success:
-            await update.message.reply_text(f"✅ Project `{project_name}` deleted", parse_mode='Markdown')
-        else:
-            await update.message.reply_text(f"❌ Failed to delete project `{project_name}`", parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error in delete_project_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-# Admin Commands
-async def admin_workspaces_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /admin_workspaces command (admin only)"""
-    user_id = update.effective_user.id
-    
-    if not db.is_admin(user_id):
-        await update.message.reply_text("❌ Access denied. Admin only.")
-        return
-    
-    try:
-        from admin_workspace_manager import get_admin_workspace_manager
-        admin_mgr = get_admin_workspace_manager(db)
-        workspaces = admin_mgr.list_all_workspaces()
-        
-        if not workspaces:
-            await update.message.reply_text("No workspaces found")
-            return
-        
-        message = "📋 *All User Workspaces*\n\n"
-        for ws in workspaces[:20]:  # Limit to 20 for message size
-            message += f"👤 User: `{ws.get('user_id')}` ({ws.get('username', 'N/A')})\n"
-            message += f"Projects: `{ws.get('project_count', 0)}` | Services: `{ws.get('service_count', 0)}`\n"
-            if ws.get('workspace_exists'):
-                size_mb = ws.get('workspace_size', 0) / 1024 / 1024
-                message += f"Size: `{size_mb:.1f} MB`\n"
-            message += "\n"
-        
-        if len(workspaces) > 20:
-            message += f"\n... and {len(workspaces) - 20} more"
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error in admin_workspaces_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def admin_workspace_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /admin_workspace command (admin only)"""
-    user_id = update.effective_user.id
-    
-    if not db.is_admin(user_id):
-        await update.message.reply_text("❌ Access denied. Admin only.")
-        return
-    
-    if not context.args:
-        await update.message.reply_text("Usage: /admin_workspace [user_id]")
-        return
-    
-    try:
-        target_user_id = int(context.args[0])
-        from admin_workspace_manager import get_admin_workspace_manager
-        admin_mgr = get_admin_workspace_manager(db)
-        details = admin_mgr.get_workspace_details(target_user_id)
-        
-        message = f"📊 *Workspace Details for User {target_user_id}*\n\n"
-        message += f"Username: `{details.get('username', 'N/A')}`\n"
-        message += f"Workspace: `{details.get('workspace_path', 'N/A')}`\n"
-        message += f"Exists: `{details.get('exists', False)}`\n"
-        if details.get('exists'):
-            size_mb = details.get('size', 0) / 1024 / 1024
-            message += f"Size: `{size_mb:.1f} MB`\n"
-            message += f"Files: `{details.get('file_count', 0)}`\n"
-            message += f"Projects: `{len(details.get('projects', []))}`\n"
-        
-        message += f"\nActive Services: `{len(details.get('active_services', []))}`\n"
-        if details.get('hosting_detected'):
-            message += f"⚠️ *Hosting Detected*\n"
-            hosting_info = details.get('hosting_info', {})
-            message += f"Processes: `{len(hosting_info.get('running_processes', []))}`\n"
-            message += f"Open Ports: `{len(hosting_info.get('open_ports', []))}`\n"
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
-    except ValueError:
-        await update.message.reply_text("❌ Invalid user ID")
-    except Exception as e:
-        logger.error(f"Error in admin_workspace_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def admin_services_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /admin_services command (admin only)"""
-    user_id = update.effective_user.id
-    
-    if not db.is_admin(user_id):
-        await update.message.reply_text("❌ Access denied. Admin only.")
-        return
-    
-    try:
-        all_services = db.get_all_services()
-        
-        if not all_services:
-            await update.message.reply_text("No services found")
-            return
-        
-        message = "📋 *All Active Services*\n\n"
-        for service in all_services[:20]:  # Limit to 20
-            status_emoji = "🟢" if service.get('status') == 'running' else "🔴"
-            message += f"{status_emoji} User: `{service.get('user_id')}` | Service: `{service.get('service_name')}`\n"
-            message += f"Status: `{service.get('status')}`\n"
-            if service.get('pid'):
-                message += f"PID: `{service.get('pid')}`\n"
-            message += "\n"
-        
-        if len(all_services) > 20:
-            message += f"\n... and {len(all_services) - 20} more"
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error in admin_services_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def admin_service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /admin_service command (admin only)"""
-    user_id = update.effective_user.id
-    
-    if not db.is_admin(user_id):
-        await update.message.reply_text("❌ Access denied. Admin only.")
-        return
-    
-    if not context.args:
-        await update.message.reply_text("Usage: /admin_service [user_id]")
-        return
-    
-    try:
-        target_user_id = int(context.args[0])
-        services = db.list_user_services(target_user_id)
-        
-        if not services:
-            await update.message.reply_text(f"No services found for user {target_user_id}")
-            return
-        
-        message = f"📋 *Services for User {target_user_id}*\n\n"
-        for service in services:
-            status_emoji = "🟢" if service.get('status') == 'running' else "🔴"
-            message += f"{status_emoji} *{service.get('service_name')}*\n"
-            message += f"Status: `{service.get('status')}`\n"
-            if service.get('pid'):
-                message += f"PID: `{service.get('pid')}`\n"
-            message += f"Command: `{service.get('command', 'N/A')[:50]}...`\n\n"
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
-    except ValueError:
-        await update.message.reply_text("❌ Invalid user ID")
-    except Exception as e:
-        logger.error(f"Error in admin_service_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def admin_delete_project_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /admin_delete_project command (admin only)"""
-    user_id = update.effective_user.id
-    
-    if not db.is_admin(user_id):
-        await update.message.reply_text("❌ Access denied. Admin only.")
-        return
-    
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text("Usage: /admin_delete_project [user_id] [project_name]")
-        return
-    
-    try:
-        target_user_id = int(context.args[0])
-        project_name = context.args[1]
-        
-        from admin_workspace_manager import get_admin_workspace_manager
-        admin_mgr = get_admin_workspace_manager(db)
-        success = admin_mgr.delete_user_project(target_user_id, project_name)
-        
-        if success:
-            await update.message.reply_text(f"✅ Project `{project_name}` deleted for user {target_user_id}", parse_mode='Markdown')
-        else:
-            await update.message.reply_text(f"❌ Failed to delete project", parse_mode='Markdown')
-    except ValueError:
-        await update.message.reply_text("❌ Invalid user ID")
-    except Exception as e:
-        logger.error(f"Error in admin_delete_project_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def admin_stop_service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /admin_stop_service command (admin only)"""
-    user_id = update.effective_user.id
-    
-    if not db.is_admin(user_id):
-        await update.message.reply_text("❌ Access denied. Admin only.")
-        return
-    
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text("Usage: /admin_stop_service [user_id] [service_name]")
-        return
-    
-    try:
-        target_user_id = int(context.args[0])
-        service_name = context.args[1]
-        
-        from admin_workspace_manager import get_admin_workspace_manager
-        admin_mgr = get_admin_workspace_manager(db)
-        success = admin_mgr.stop_user_service(target_user_id, service_name)
-        
-        if success:
-            await update.message.reply_text(f"✅ Service `{service_name}` stopped for user {target_user_id}", parse_mode='Markdown')
-        else:
-            await update.message.reply_text(f"❌ Failed to stop service", parse_mode='Markdown')
-    except ValueError:
-        await update.message.reply_text("❌ Invalid user ID")
-    except Exception as e:
-        logger.error(f"Error in admin_stop_service_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def admin_delete_service_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /admin_delete_service command (admin only)"""
-    user_id = update.effective_user.id
-    
-    if not db.is_admin(user_id):
-        await update.message.reply_text("❌ Access denied. Admin only.")
-        return
-    
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text("Usage: /admin_delete_service [user_id] [service_name]")
-        return
-    
-    try:
-        target_user_id = int(context.args[0])
-        service_name = context.args[1]
-        
-        from admin_workspace_manager import get_admin_workspace_manager
-        admin_mgr = get_admin_workspace_manager(db)
-        success = admin_mgr.delete_user_service(target_user_id, service_name)
-        
-        if success:
-            await update.message.reply_text(f"✅ Service `{service_name}` deleted for user {target_user_id}", parse_mode='Markdown')
-        else:
-            await update.message.reply_text(f"❌ Failed to delete service", parse_mode='Markdown')
-    except ValueError:
-        await update.message.reply_text("❌ Invalid user ID")
-    except Exception as e:
-        logger.error(f"Error in admin_delete_service_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def admin_workspace_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /admin_workspace_stats command (admin only)"""
-    user_id = update.effective_user.id
-    
-    if not db.is_admin(user_id):
-        await update.message.reply_text("❌ Access denied. Admin only.")
-        return
-    
-    try:
-        from admin_workspace_manager import get_admin_workspace_manager
-        admin_mgr = get_admin_workspace_manager(db)
-        stats = admin_mgr.get_workspace_statistics()
-        
-        message = "📊 *Workspace Statistics*\n\n"
-        message += f"Total Workspaces: `{stats.get('total_workspaces', 0)}`\n"
-        total_size_gb = stats.get('total_size', 0) / 1024 / 1024 / 1024
-        message += f"Total Size: `{total_size_gb:.2f} GB`\n"
-        message += f"Active Services: `{stats.get('active_services_count', 0)}`\n"
-        message += f"Total Projects: `{stats.get('total_projects', 0)}`\n"
-        message += f"Users with Hosting: `{stats.get('users_with_hosting', 0)}`\n\n"
-        
-        if stats.get('projects_by_type'):
-            message += "*Projects by Type:*\n"
-            for ptype, count in stats['projects_by_type'].items():
-                message += f"`{ptype}`: {count}\n"
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error in admin_workspace_stats_command: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
-
-async def face_swap_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /face_swap command"""
-    user_id = update.effective_user.id
-    
-    # Check if user has uploaded images
-    if update.message.photo or update.message.document:
-        # Store images in context for processing
-        context.user_data['face_swap_pending'] = True
-        await update.message.reply_text(
-            "🔄 *Face Swap*\n\n"
-            "Please send two images:\n"
-            "1. Source image (face to copy)\n"
-            "2. Target image (face to replace)\n\n"
-            "You can also add context: `/face_swap holding a card`",
-            parse_mode='Markdown'
-        )
-        return
-    
-    context_instruction = ' '.join(context.args) if context.args else None
-    
-    if context_instruction:
-        context.user_data['face_swap_context'] = context_instruction
-        await update.message.reply_text(
-            f"✅ Context saved: `{context_instruction}`\n"
-            "Now send two images for face swap.",
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text(
-            "🔄 *Face Swap*\n\n"
-            "Usage: Send two images (source + target) or use:\n"
-            "`/face_swap [context]`\n\n"
-            "Example: `/face_swap holding a card`",
-            parse_mode='Markdown'
-        )
-
-
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle image messages - process with vision models"""
     user_id = update.effective_user.id
@@ -4529,141 +3085,53 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        # Get user workspace for permanent photo storage
-        try:
-            from user_workspace_manager import UserWorkspaceManager
-            workspace_manager = UserWorkspaceManager.get_instance()
-            user_workspace = workspace_manager.get_user_workspace(user_id)
-            workspace = Path(user_workspace)
-        except ImportError:
-            base_workspace = os.getenv('WORKSPACE_ROOT', os.getcwd())
-            workspace = Path(base_workspace) / f"user_{user_id}"
-            workspace.mkdir(parents=True, exist_ok=True)
-        
-        # Download image to permanent location
+        # Download image
         file = await context.bot.get_file(file_id)
-        image_path = workspace / f"photo_{user_id}_{int(time.time())}.jpg"
-        await file.download_to_drive(str(image_path))
-        
-        # Store photo path in context for template processing
-        context.user_data['last_photo'] = str(image_path)
-        context.user_data['last_photo_time'] = time.time()
-        
-        # Persist photo to database state
-        try:
-            from user_state_manager import get_user_state_manager
-            state_mgr = get_user_state_manager(db)
-            state_mgr.save_state(user_id, 'last_photo', {'path': str(image_path), 'timestamp': time.time()}, workspace_path=str(workspace))
-            logger.info(f"Saved photo to state: {image_path}")
-        except Exception as e:
-            logger.warning(f"Could not save photo to state: {e}")
-        
-        # Send immediate confirmation that photo is saved
-        await update.message.reply_text(
-            f"📸 **Photo received and saved!**\n\n"
-            f"✅ Photo is ready for ID generation.\n\n"
-            f"Send your details:\n"
-            f"• Name: [Your Name]\n"
-            f"• DOB: [MM/DD/YYYY]\n"
-            f"• Address: [Your Address]"
-        )
+        image_path = f"temp_image_{user_id}_{file_id}.jpg"
+        await file.download_to_drive(image_path)
         
         # Get caption or use default
         caption = update.message.caption or "What is in this image? Describe it in detail."
         
-        # Process image with vision models (optional - photo is already saved, run in background)
-        vision_processed = False
+        # Process image with vision models
         try:
-            # Try to use DesktopAIHandler, fallback to vision_processor
-            try:
-                from desktop_ai_handler import DesktopAIHandler
-                handler_available = True
-            except ImportError:
-                handler_available = False
-                from vision_processor import get_vision_processor
+            from desktop_ai_handler import DesktopAIHandler
+            from HacxGPT import HacxBrain
+            from telegram_bot_module import TelegramUI
             
             brain = get_user_brain(user_id)
+            workspace = os.path.join(os.getcwd(), f"user_{user_id}")
+            os.makedirs(workspace, exist_ok=True)
             
-            if handler_available:
-                try:
-                    workspace = os.path.join(os.getcwd(), f"user_{user_id}")
-                    os.makedirs(workspace, exist_ok=True)
-                    desktop_handler = DesktopAIHandler(brain, workspace_root=workspace, user_id=user_id)
-                    # Add timeout to prevent hanging
-                    import asyncio
-                    result = await asyncio.wait_for(
-                        desktop_handler.process_image(image_path, caption),
-                        timeout=30.0  # 30 second timeout
-                    )
-                    
-                    if result.get('success'):
-                        response_text = result.get('result', 'Image processed successfully')
-                        # Send analysis as separate message (photo already confirmed)
-                        await update.message.reply_text(f"🖼️ **Image Analysis:**\n\n{response_text}", parse_mode='Markdown')
-                        vision_processed = True
-                    else:
-                        error = result.get('error', 'Unknown error')
-                        # Don't send another message - photo already confirmed above
-                        logger.info(f"Vision analysis failed: {error}")
-                except asyncio.TimeoutError:
-                    logger.warning("Vision processing timed out after 30 seconds")
-                    # Photo already confirmed, no need to send another message
-                except Exception as e:
-                    logger.warning(f"Vision processing error: {e}")
-                    # Photo already confirmed, no need to send another message
+            desktop_handler = DesktopAIHandler(brain, workspace_root=workspace, user_id=user_id)
+            
+            # Process image
+            result = await desktop_handler.process_image(image_path, caption)
+            
+            if result.get('success'):
+                response_text = result.get('result', 'Image processed successfully')
+                await update.message.reply_text(f"🖼️ **Image Analysis:**\n\n{response_text}", parse_mode='Markdown')
             else:
-                # Fallback: use vision processor directly with timeout
-                try:
-                    vision_proc = get_vision_processor()
-                    # Add timeout to prevent hanging
-                    import asyncio
-                    result = await asyncio.wait_for(
-                        asyncio.to_thread(vision_proc.process_image, image_path, prompt=caption),
-                        timeout=30.0  # 30 second timeout
-                    )
-                    
-                    if result.get('success'):
-                        response_text = result.get('result', 'Image processed successfully')
-                        # Send analysis as separate message (photo already confirmed)
-                        await update.message.reply_text(f"🖼️ **Image Analysis:**\n\n{response_text}", parse_mode='Markdown')
-                        vision_processed = True
-                    else:
-                        error = result.get('error', 'Unknown error')
-                        # Don't send another message - photo already confirmed above
-                        logger.info(f"Vision analysis failed: {error}")
-                except asyncio.TimeoutError:
-                    logger.warning("Vision processing timed out after 30 seconds")
-                    # Photo already confirmed, no need to send another message
-                except Exception as e:
-                    logger.warning(f"Vision processing error: {e}")
-                    # Photo already confirmed, no need to send another message
+                error = result.get('error', 'Unknown error')
+                await update.message.reply_text(f"❌ **Error processing image:**\n{error}")
         
         except Exception as e:
             logger.error(f"Image processing error: {e}", exc_info=True)
-            # Don't fail completely - photo is saved
-            if 'No vision models' in str(e) or 'vision' in str(e).lower():
-                await update.message.reply_text(
-                    f"📸 **Photo saved!**\n\n"
-                    f"ℹ️ Vision analysis is optional (no API keys needed for ID generation).\n"
-                    f"✅ Photo is ready for ID generation.\n\n"
-                    f"Send your name, DOB, and address to generate your Texas ID."
-                )
-            else:
-                await update.message.reply_text(
-                    f"📸 **Photo saved!**\n\n"
-                    f"⚠️ Vision analysis error: {str(e)}\n"
-                    f"✅ Photo is ready for ID generation."
-                )
-        
-        # Vision processing is optional - photo is already confirmed above
-        # No need to send another confirmation message
+            await update.message.reply_text(f"❌ Error processing image: {str(e)}")
+        finally:
+            # Clean up temp file
+            try:
+                if os.path.exists(image_path):
+                    os.remove(image_path)
+            except:
+                pass
+    
     except Exception as e:
         logger.error(f"Error handling image: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Error: {str(e)}")
-    # Note: Photo is saved permanently in user workspace, not deleted
 
 
-async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
+async def analyze_uploaded_file(file_path: str) -> Dict:
     """Analyze uploaded file and return full content + summary"""
     try:
         path = Path(file_path)
@@ -4673,140 +3141,35 @@ async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
         file_size = path.stat().st_size
         file_ext = path.suffix.lower()
         
-        # Maximum file size for reading (1MB for code files, 10MB for PDFs)
+        # Maximum file size for reading (1MB for code files)
         MAX_FILE_SIZE = 1024 * 1024  # 1MB
-        MAX_PDF_SIZE = 10 * 1024 * 1024  # 10MB for PDFs
         
-        # Detect file type - check MIME type first (most reliable), then extension, then magic bytes
+        # Detect file type
         file_type = 'unknown'
+        code_extensions = ['.py', '.pyw', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', 
+                          '.hpp', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.scala', '.sh', 
+                          '.bash', '.zsh', '.sql', '.html', '.css', '.scss', '.less', '.vue', '.svelte']
+        config_extensions = ['.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.conf', '.env']
+        text_extensions = ['.txt', '.md', '.markdown', '.rst', '.log']
         
-        # Check MIME type first (from Telegram) - most reliable
-        if mime_type:
-            mime_lower = mime_type.lower()
-            if 'pdf' in mime_lower:
-                file_type = 'pdf'
-            elif 'word' in mime_lower or 'document' in mime_lower or 'docx' in mime_lower or 'msword' in mime_lower:
-                file_type = 'word'
-            elif 'excel' in mime_lower or 'spreadsheet' in mime_lower or 'xlsx' in mime_lower or 'ms-excel' in mime_lower:
-                file_type = 'excel'
-            elif 'powerpoint' in mime_lower or 'presentation' in mime_lower or 'pptx' in mime_lower or 'ms-powerpoint' in mime_lower:
-                file_type = 'powerpoint'
-            elif 'image' in mime_lower:
-                file_type = 'image'
-            elif 'video' in mime_lower:
-                file_type = 'video'
-            elif 'audio' in mime_lower:
-                file_type = 'audio'
-            elif 'zip' in mime_lower or 'archive' in mime_lower or 'compressed' in mime_lower:
-                file_type = 'archive'
-            elif 'text' in mime_lower or 'plain' in mime_lower:
-                file_type = 'text'
-            elif 'json' in mime_lower:
-                file_type = 'config'
-            elif 'javascript' in mime_lower or 'js' in mime_lower:
-                file_type = 'javascript'
-            elif 'python' in mime_lower or 'py' in mime_lower:
-                file_type = 'python'
-        
-        # If MIME type didn't help, check extension
-        if file_type == 'unknown':
-            # Document types
-            document_extensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp']
-            archive_extensions = ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz']
-            image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico', '.tiff', '.tif']
-            video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.mpg', '.mpeg']
-            audio_extensions = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a']
-            
-            # Code extensions
-            code_extensions = ['.py', '.pyw', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', 
-                              '.hpp', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.scala', '.sh', 
-                              '.bash', '.zsh', '.sql', '.html', '.css', '.scss', '.less', '.vue', '.svelte']
-            config_extensions = ['.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.conf', '.env']
-            text_extensions = ['.txt', '.md', '.markdown', '.rst', '.log']
-            
-            # Check file type by extension
-            if file_ext in document_extensions:
-                if file_ext == '.pdf':
-                    file_type = 'pdf'
-                elif file_ext in ['.doc', '.docx']:
-                    file_type = 'word'
-                elif file_ext in ['.xls', '.xlsx']:
-                    file_type = 'excel'
-                elif file_ext in ['.ppt', '.pptx']:
-                    file_type = 'powerpoint'
-                else:
-                    file_type = 'document'
-            elif file_ext in archive_extensions:
-                file_type = 'archive'
-            elif file_ext in image_extensions:
-                file_type = 'image'
-            elif file_ext in video_extensions:
-                file_type = 'video'
-            elif file_ext in audio_extensions:
-                file_type = 'audio'
-            elif file_ext in code_extensions:
-                file_type = 'code'
-                # More specific types
-                if file_ext in ['.py', '.pyw']:
-                    file_type = 'python'
-                elif file_ext in ['.js', '.ts', '.jsx', '.tsx']:
-                    file_type = 'javascript'
-                elif file_ext in ['.sh', '.bash', '.zsh']:
-                    file_type = 'shell'
-            elif file_ext in config_extensions:
-                file_type = 'config'
-            elif file_ext in text_extensions:
-                file_type = 'text'
+        if file_ext in code_extensions:
+            file_type = 'code'
+        elif file_ext in config_extensions:
+            file_type = 'config'
+        elif file_ext in text_extensions:
+            file_type = 'text'
+        elif file_ext in ['.py', '.pyw']:
+            file_type = 'python'
+        elif file_ext in ['.js', '.ts', '.jsx', '.tsx']:
+            file_type = 'javascript'
+        elif file_ext in ['.sh', '.bash', '.zsh']:
+            file_type = 'shell'
         else:
             file_type = 'unknown'
         
-        # Also check file magic bytes for better detection (especially for PDFs)
-        if file_type == 'unknown' or file_ext == '':
-            try:
-                with open(file_path, 'rb') as f:
-                    header = f.read(16)
-                    # PDF magic bytes: %PDF
-                    if header.startswith(b'%PDF'):
-                        file_type = 'pdf'
-                    # ZIP-based formats (docx, xlsx, etc.)
-                    elif header.startswith(b'PK\x03\x04'):
-                        if file_ext in ['.docx']:
-                            file_type = 'word'
-                        elif file_ext in ['.xlsx']:
-                            file_type = 'excel'
-                        elif file_ext in ['.pptx']:
-                            file_type = 'powerpoint'
-                        elif file_ext in ['.zip']:
-                            file_type = 'archive'
-                        else:
-                            file_type = 'archive'  # Likely a ZIP-based format
-            except Exception as e:
-                logger.debug(f"Could not read file header for type detection: {e}")
-        
         # Read full file content if it's a text-based file and within size limit
         file_content = None
-        if file_type == 'pdf':
-            # For PDFs, try to extract basic info from PDF if PyPDF2 is available
-            try:
-                try:
-                    import PyPDF2
-                    with open(file_path, 'rb') as f:
-                        pdf_reader = PyPDF2.PdfReader(f)
-                        num_pages = len(pdf_reader.pages)
-                        # Try to extract first page text as preview
-                        if num_pages > 0:
-                            try:
-                                first_page = pdf_reader.pages[0]
-                                preview_text = first_page.extract_text()[:500]
-                                if preview_text:
-                                    file_content = preview_text
-                            except:
-                                pass
-                except ImportError:
-                    pass  # PyPDF2 not available - that's okay
-            except Exception as e:
-                logger.debug(f"Could not read PDF: {e}")
-        elif file_size <= MAX_FILE_SIZE and file_type in ['code', 'python', 'javascript', 'shell', 'text', 'config']:
+        if file_size <= MAX_FILE_SIZE and file_type in ['code', 'python', 'javascript', 'shell', 'text', 'config']:
             try:
                 # Try UTF-8 first
                 file_content = path.read_text(encoding='utf-8')
@@ -4820,13 +3183,6 @@ async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
         
         # Generate summary
         summary = f"File type: {file_type}\nSize: {file_size / 1024:.1f} KB"
-        if mime_type:
-            summary += f"\nMIME type: {mime_type}"
-        
-        if file_type == 'pdf':
-            summary += "\n📄 PDF document detected"
-            if file_content:
-                summary += f"\nPreview (first page): {file_content[:200]}..."
         
         if file_content:
             lines = len(file_content.split('\n'))
@@ -4848,10 +3204,7 @@ async def analyze_uploaded_file(file_path: str, mime_type: str = None) -> Dict:
                 classes = len(re.findall(r'class\s+\w+', file_content, re.MULTILINE | re.IGNORECASE))
                 summary += f"\nFunctions: {functions}\nClasses: {classes}"
         else:
-            if file_type == 'pdf':
-                summary += "\n📄 PDF document (binary format)"
-            else:
-                summary += "\n⚠️ File too large or binary - content not read"
+            summary += "\n⚠️ File too large or binary - content not read"
         
         return {
             'summary': summary,
@@ -4891,7 +3244,7 @@ async def handle_enhancement_request(query, data: str, user_id: int, context: Co
         # Get uploaded file from context
         uploaded_files = context.user_data.get('uploaded_files', [])
         if not uploaded_files:
-            await safe_edit_message_text(query, "❌ No file found. Please upload a file first.")
+            await query.edit_message_text("❌ No file found. Please upload a file first.")
             return
         
         latest_file = uploaded_files[-1]
@@ -4912,101 +3265,59 @@ async def handle_enhancement_request(query, data: str, user_id: int, context: Co
             enhancement_type = "general"
         elif data == "analyze_code":
             # Just analyze, don't enhance
-            await safe_edit_message_text(query, "🔍 Analyzing code...")
+            await query.edit_message_text("🔍 Analyzing code...")
             try:
-                # Try to import DesktopAIHandler, fallback to direct brain usage
-                try:
-                    from desktop_ai_handler import DesktopAIHandler
-                    handler_available = True
-                except ImportError:
-                    handler_available = False
-                    logger.warning("DesktopAIHandler not available, using direct brain access")
+                from desktop_ai_handler import DesktopAIHandler
+                from HacxGPT import get_user_brain
                 
                 brain = get_user_brain(user_id)
+                workspace = Path(file_path).parent
+                handler = DesktopAIHandler(brain, workspace_root=str(workspace), user_id=user_id)
                 
                 # Read and analyze code
-                code = Path(file_path).read_text(encoding='utf-8', errors='ignore')
+                code = Path(file_path).read_text(encoding='utf-8')
                 analysis_prompt = f"Analyze this code in detail:\n\n```python\n{code[:2000]}\n```\n\nProvide a comprehensive analysis."
                 
-                if handler_available:
-                    workspace = Path(file_path).parent
-                    handler = DesktopAIHandler(brain, workspace_root=str(workspace), user_id=user_id)
-                    analysis_result = ""
-                    for chunk in handler.stream_ai_response(analysis_prompt):
-                        analysis_result += chunk
-                else:
-                    # Fallback: use brain directly
-                    analysis_result = ""
-                    for chunk in brain.chat(analysis_prompt):
-                        analysis_result += chunk
+                analysis_result = ""
+                for chunk in handler.stream_ai_response(analysis_prompt):
+                    analysis_result += chunk
                 
-                await safe_edit_message_text(
-                    query,
+                await query.edit_message_text(
                     f"📊 **Code Analysis:** `{file_name}`\n\n{analysis_result[:3000]}",
                     parse_mode='Markdown'
                 )
             except Exception as e:
                 logger.error(f"Error analyzing code: {e}")
-                await safe_edit_message_text(query, f"❌ Error analyzing code: {str(e)}")
+                await query.edit_message_text(f"❌ Error analyzing code: {str(e)}")
             return
         
         # Enhance code
-        await safe_edit_message_text(query, f"✨ Enhancing code ({enhancement_type})...")
+        await query.edit_message_text(f"✨ Enhancing code ({enhancement_type})...")
         
         try:
-            # Try to import DesktopAIHandler, fallback to direct brain usage
-            try:
-                from desktop_ai_handler import DesktopAIHandler
-                handler_available = True
-            except ImportError:
-                handler_available = False
-                logger.warning("DesktopAIHandler not available, using direct brain access")
+            from desktop_ai_handler import DesktopAIHandler
+            from HacxGPT import get_user_brain
             
             brain = get_user_brain(user_id)
+            workspace = Path(file_path).parent
+            handler = DesktopAIHandler(brain, workspace_root=str(workspace), user_id=user_id)
             
-            if handler_available:
-                workspace = Path(file_path).parent
-                handler = DesktopAIHandler(brain, workspace_root=str(workspace), user_id=user_id)
-                
-                # Enhance code
-                enhanced_path, review = await handler.enhance_uploaded_code(
-                    file_path, enhancement_type, query.message, context
-                )
-                
-                # Send enhanced file
-                if Path(enhanced_path).exists():
-                    with open(enhanced_path, 'rb') as f:
-                        await query.message.reply_document(
-                            document=f,
-                            filename=f"enhanced_{file_name}",
-                            caption=f"✨ Enhanced code ({enhancement_type})"
-                        )
-                    await safe_edit_message_text(query, f"✅ Code enhanced successfully! Enhanced file sent.")
-                else:
-                    await safe_edit_message_text(query, "❌ Enhancement failed. File not generated.")
+            # Enhance code
+            enhanced_path, review = await handler.enhance_uploaded_code(
+                file_path, enhancement_type, query.message, context
+            )
+            
+            # Send enhanced file
+            if Path(enhanced_path).exists():
+                with open(enhanced_path, 'rb') as f:
+                    await query.message.reply_document(
+                        document=f,
+                        filename=f"enhanced_{file_name}",
+                        caption=f"✨ Enhanced code ({enhancement_type})"
+                    )
+                await query.edit_message_text(f"✅ Code enhanced successfully! Enhanced file sent.")
             else:
-                # Fallback: use brain directly to enhance
-                code = Path(file_path).read_text(encoding='utf-8', errors='ignore')
-                enhancement_prompt = f"Enhance this code ({enhancement_type}):\n\n```python\n{code[:2000]}\n```"
-                
-                enhanced_code = ""
-                for chunk in brain.chat(enhancement_prompt):
-                    enhanced_code += chunk
-                
-                # Save enhanced code
-                enhanced_path = Path(file_path).parent / f"enhanced_{file_name}"
-                enhanced_path.write_text(enhanced_code, encoding='utf-8')
-                
-                if Path(enhanced_path).exists():
-                    with open(enhanced_path, 'rb') as f:
-                        await query.message.reply_document(
-                            document=f,
-                            filename=f"enhanced_{file_name}",
-                            caption=f"✨ Enhanced code ({enhancement_type})"
-                        )
-                    await safe_edit_message_text(query, f"✅ Code enhanced successfully! Enhanced file sent.")
-                else:
-                    await safe_edit_message_text(query, "❌ Enhancement failed. File not generated.")
+                await query.edit_message_text("❌ Enhancement failed. File not generated.")
         except Exception as e:
             logger.error(f"Error enhancing code: {e}", exc_info=True)
             await query.edit_message_text(f"❌ Error enhancing code: {str(e)}")
@@ -5048,9 +3359,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"File uploaded by user {user_id}: {file_name} -> {file_path}")
         
         # Analyze file and read full content
-        # Get MIME type from Telegram document if available
-        mime_type = getattr(document, 'mime_type', None)
-        analysis = await analyze_uploaded_file(str(file_path), mime_type=mime_type)
+        analysis = await analyze_uploaded_file(str(file_path))
         
         # Store file in context as current file
         if hasattr(context, 'user_data'):
@@ -5128,125 +3437,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_message = update.message.text
     
-    logger.info(f"[MSG-RECEIVED] User {user_id} sent message")
-    logger.info(f"[MSG-RECEIVED] Message preview: {user_message[:200] if user_message else 'None'}...")
-    logger.info(f"[MSG-RECEIVED] Message length: {len(user_message) if user_message else 0} chars")
+    logger.info(f"📨 Received message from user {user_id}: {user_message[:100] if user_message else 'None'}")
     
     if not user_message:
         logger.debug(f"Empty message from user {user_id}, skipping")
         return
-    
-    # JOB QUEUE: Check if this should be processed as a background job
-    # Skip job queue for simple queries (greetings, status checks, etc.)
-    simple_queries = ['hello', 'hi', 'hey', 'status', 'help', 'what', 'how', 'when', 'where', 'why']
-    is_simple_query = any(query in user_message.lower()[:20] for query in simple_queries)
-    
-    # Skip job queue for ID generation (handled specially)
-    is_id_generation = any(keyword in user_message.lower() for keyword in ['id', 'driver', 'license', 'identification'])
-    
-    # Use job queue for complex tasks (generation, scanning, hacking, etc.)
-    complex_keywords = ['generate', 'create', 'build', 'scan', 'check', 'hack', 'exploit', 'vulnerability', 
-                       'test', 'run', 'execute', 'analyze', 'find', 'search', 'develop', 'code']
-    is_complex_task = any(keyword in user_message.lower() for keyword in complex_keywords)
-    
-    if is_complex_task and not is_simple_query and not is_id_generation:
-        try:
-            from job_queue import get_job_queue, JobStatus
-            job_queue = get_job_queue(db)
-            
-            # Create job
-            job_id = job_queue.create_job(
-                user_id=user_id,
-                chat_id=update.effective_chat.id,
-                task_description=user_message,
-                job_data={'user_message': user_message, 'chat_id': update.effective_chat.id}
-            )
-            
-            # Send initial acknowledgment
-            initial_msg = await update.message.reply_text(
-                f"🔄 **Task Started**\n\n"
-                f"Your request is being processed in the background.\n"
-                f"Job ID: `{job_id[:8]}`\n\n"
-                f"I'll stream progress updates automatically until completion.",
-                parse_mode='Markdown'
-            )
-            
-            # Update job with initial message ID
-            job_queue.update_job(job_id, last_message_id=initial_msg.message_id, status=JobStatus.RUNNING)
-            
-            logger.info(f"Created job {job_id} for user {user_id}: {user_message[:100]}")
-            return  # Job worker will handle the rest
-            
-        except Exception as e:
-            logger.error(f"Error creating job: {e}", exc_info=True)
-            # Fall through to normal processing
-    
-    # RESTORE STATE: Check for pending tasks and saved data from previous session
-    try:
-        from user_state_manager import get_user_state_manager
-        from continuous_executor import get_continuous_executor
-        
-        state_mgr = get_user_state_manager(db)
-        continuous_exec = get_continuous_executor()
-        
-        # Get ALL saved state for this user
-        all_state = state_mgr.get_all_user_state(user_id)
-        
-        # Restore saved photo if exists
-        if 'last_photo' in all_state:
-            photo_state = all_state['last_photo']
-            photo_path = photo_state.get('value', {}).get('path')
-            if photo_path:
-                from pathlib import Path as PathLib
-                if PathLib(photo_path).exists():
-                    context.user_data['last_photo'] = photo_path
-                    context.user_data['last_photo_time'] = photo_state.get('last_updated')
-                    logger.info(f"Restored saved photo: {photo_path}")
-        
-        # Restore saved user data (name, DOB, address, etc.)
-        if 'user_data' in all_state:
-            user_data_state = all_state['user_data']
-            saved_user_data = user_data_state.get('value', {})
-            if saved_user_data:
-                context.user_data['saved_user_data'] = saved_user_data
-                logger.info(f"Restored saved user data: {saved_user_data}")
-        
-        # Restore current project
-        if 'current_project' in all_state:
-            current_project = all_state['current_project'].get('value', {})
-            if current_project:
-                context.user_data['current_project'] = current_project
-                logger.info(f"Restored current project: {current_project.get('project_name')}")
-        
-        # Check for pending task (async function - need to await)
-        try:
-            pending_task = await continuous_exec.check_and_resume_task(user_id)
-        except Exception as e:
-            logger.warning(f"Error checking pending task: {e}")
-            pending_task = None
-        
-        if pending_task:
-            task_desc = pending_task.get('task_description', '')
-            # If user is asking about their work, restore context
-            if any(keyword in user_message.lower() for keyword in ['project', 'working', 'doing', 'id project', 'continue', 'resume', 'remember', 'were working']):
-                restored_info = []
-                if context.user_data.get('last_photo'):
-                    restored_info.append("✅ Photo found")
-                if context.user_data.get('saved_user_data'):
-                    restored_info.append(f"✅ User data: {context.user_data['saved_user_data'].get('name', 'N/A')}")
-                if current_project:
-                    restored_info.append(f"✅ Project: {current_project.get('project_name')}")
-                
-                await update.message.reply_text(
-                    f"📋 **Resuming Previous Task:**\n\n"
-                    f"Task: {task_desc}\n"
-                    f"Status: {pending_task.get('status', 'pending')}\n"
-                    f"{chr(10).join(restored_info) if restored_info else '⚠️ No saved data found'}\n\n"
-                    f"🔄 Continuing execution...",
-                    parse_mode='Markdown'
-                )
-    except Exception as e:
-        logger.warning(f"Could not restore state: {e}", exc_info=True)
     
     # Log user message for training data collection
     try:
@@ -5267,37 +3462,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning(f"Error logging training data (user input): {e}")
     
-    # Detect and save requested state if user mentions it (e.g., "I want a Florida state ID")
-    message_lower = user_message.lower()
-    state_keywords_detect = {
-        'texas': ['texas', 'tx'],
-        'florida': ['florida', 'fl'],
-        'california': ['california', 'ca'],
-        'new york': ['new york', 'ny', 'newyork'],
-        'illinois': ['illinois', 'il'],
-        'ohio': ['ohio', 'oh'],
-        'pennsylvania': ['pennsylvania', 'pa'],
-        'georgia': ['georgia', 'ga'],
-        'michigan': ['michigan', 'mi']
-    }
-    
-    # Check if message contains state ID request (e.g., "I want a Florida state ID")
-    id_request_patterns = ['want', 'need', 'get', 'generate', 'create', 'make', 'check']
-    has_id_request = any(pattern in message_lower for pattern in id_request_patterns)
-    has_state_id_keywords = any(keyword in message_lower for keyword in ['state id', 'state id', 'driver license', 'driver\'s license', 'dl', 'id'])
-    
-    if has_id_request and has_state_id_keywords:
-        for state, keywords in state_keywords_detect.items():
-            if any(keyword in message_lower for keyword in keywords):
-                try:
-                    from user_state_manager import get_user_state_manager
-                    state_mgr = get_user_state_manager(db)
-                    state_mgr.save_state(user_id, 'requested_state', state)
-                    logger.info(f"Detected and saved requested state from message: {state}")
-                except Exception as e:
-                    logger.warning(f"Could not save detected state: {e}")
-                break
-    
     # Check if user is blocked
     if db.is_blocked(user_id):
         blocked_text = """
@@ -5314,442 +3478,6 @@ If you believe this is an error, please contact support.
         except:
             pass
         return
-    
-    # AUTO-DETECT: Check if user has photo + ID data and wants to generate ID
-    # First check context, then check saved state
-    user_photo = context.user_data.get('last_photo')
-    if not user_photo:
-        # Try to restore from saved state
-        try:
-            from user_state_manager import get_user_state_manager
-            state_mgr = get_user_state_manager(db)
-            photo_state = state_mgr.get_state(user_id, 'last_photo')
-            if photo_state and photo_state.get('value', {}).get('path'):
-                user_photo = photo_state['value']['path']
-                context.user_data['last_photo'] = user_photo
-        except Exception as e:
-            logger.warning(f"Could not restore photo from state: {e}")
-    
-    # CHECK FOR "SEND ME THE GENERATED ID" OR "SEND RESULTS NOW" REQUEST
-    message_lower = user_message.lower()
-    send_results_phrases = ['send me the generated id', 'send me the id', 'where is the id', 'do you have the id', 
-                            'show me the id', 'send results now', 'send them', 'send it', 'are you done', 
-                            'send the id', 'send the results', 'send now']
-    if any(phrase in message_lower for phrase in send_results_phrases):
-        # Check if ID was already generated
-        try:
-            from user_state_manager import get_user_state_manager
-            from pathlib import Path as PathLib
-            state_mgr = get_user_state_manager(db)
-            
-            # Check for delivered results
-            pending_task = state_mgr.get_pending_task(user_id)
-            if pending_task:
-                delivered = pending_task.get('results_delivered', [])
-                for result in delivered:
-                    if result.get('type') == 'id_image' and result.get('path'):
-                        id_path = result['path']
-                        if PathLib(id_path).exists():
-                            # Send existing ID
-                            with open(id_path, 'rb') as f:
-                                await update.message.reply_photo(
-                                    photo=f,
-                                    caption="✅ **ID (Previously Generated)**"
-                                )
-                            logger.info(f"Sent previously generated ID: {id_path}")
-                            return
-            
-            # Check workspace for generated ID files
-            try:
-                from user_workspace_manager import UserWorkspaceManager
-                workspace_manager = UserWorkspaceManager.get_instance()
-                user_workspace = workspace_manager.get_user_workspace(user_id)
-            except ImportError:
-                base_workspace = os.getenv('WORKSPACE_ROOT', os.getcwd())
-                user_workspace = PathLib(os.path.join(base_workspace, f"user_{user_id}"))
-            
-            # Search for ID files (front and back)
-            id_files = list(user_workspace.rglob('*id*.png')) + list(user_workspace.rglob('*florida*.png')) + list(user_workspace.rglob('*texas*.png'))
-            if id_files:
-                # Get most recent
-                latest_id = max(id_files, key=lambda p: p.stat().st_mtime)
-                with open(latest_id, 'rb') as f:
-                    await update.message.reply_photo(
-                        photo=f,
-                        caption="✅ **Generated ID**"
-                    )
-                logger.info(f"Sent found ID: {latest_id}")
-                return
-            
-            # If no ID found, generate it using saved photo + data
-            user_photo = context.user_data.get('last_photo')
-            if not user_photo:
-                photo_state = state_mgr.get_state(user_id, 'last_photo')
-                if photo_state and photo_state.get('value', {}).get('path'):
-                    user_photo = photo_state['value']['path']
-                    context.user_data['last_photo'] = user_photo
-            
-            if user_photo and PathLib(user_photo).exists():
-                # Get saved user data
-                user_data = context.user_data.get('saved_user_data', {})
-                if not user_data:
-                    user_data_state = state_mgr.get_state(user_id, 'user_data')
-                    if user_data_state:
-                        user_data = user_data_state.get('value', {})
-                
-                if user_data:
-                    # Get requested state
-                    requested_state = None
-                    state_history = state_mgr.get_state(user_id, 'requested_state')
-                    if state_history and state_history.get('value'):
-                        requested_state = state_history['value']
-                    
-                    # Default to Florida if mentioned, else Texas
-                    if 'florida' in message_lower or 'fl' in message_lower:
-                        requested_state = 'florida'
-                    elif not requested_state:
-                        requested_state = 'texas'
-                    
-                    # Actually generate ID now
-                    await update.message.reply_text(f"🔄 Generating {requested_state.title()} ID from saved photo and data...")
-                    
-                    try:
-                        from template_manager import get_template_manager
-                        from id_template_processor import get_id_processor
-                        
-                        tm = get_template_manager(db)
-                        id_processor = get_id_processor()
-                        
-                        # Find template
-                        template_name_map = {
-                            'texas': 'texas_dl',
-                            'florida': 'florida_dl',
-                            'california': 'california_dl'
-                        }
-                        template_name = template_name_map.get(requested_state, 'texas_dl')
-                        
-                        # Generate ID
-                        filepath = id_processor.process_texas_id_with_photo(
-                            user_photo,
-                            template_name=template_name,
-                            user_data=user_data
-                        )
-                        
-                        if filepath and PathLib(filepath).exists():
-                            file_size = PathLib(filepath).stat().st_size
-                            if file_size > 0:
-                                # Send the ID
-                                with open(filepath, 'rb') as f:
-                                    await update.message.reply_photo(
-                                        photo=f,
-                                        caption=f"✅ **{requested_state.title()} ID Generated**\n\n"
-                                               f"Name: {user_data.get('name', 'N/A')}\n"
-                                               f"DOB: {user_data.get('dob', 'N/A')}\n"
-                                               f"Address: {user_data.get('address', 'N/A')}",
-                                        parse_mode='Markdown'
-                                    )
-                                logger.info(f"Generated and sent ID: {filepath}")
-                                
-                                # Mark as delivered
-                                state_mgr.mark_result_delivered(user_id, 'id_image', filepath)
-                                return
-                            else:
-                                await update.message.reply_text("❌ Generated ID file is empty. Please try again.")
-                        else:
-                            await update.message.reply_text("❌ ID generation failed. Please try again with a clear photo.")
-                    except Exception as e:
-                        logger.error(f"Error generating ID: {e}", exc_info=True)
-                        await update.message.reply_text(f"❌ Error generating ID: {str(e)}")
-                    return
-                else:
-                    await update.message.reply_text("❌ I have your photo but need name/DOB/address. Please provide:\n\nName: [Your Name]\nDOB: [MM/DD/YYYY]\nAddress: [Your Address]")
-                    return
-            else:
-                await update.message.reply_text("❌ No photo found. Please upload a photo first.")
-                return
-        except Exception as e:
-            logger.error(f"Error checking for generated ID: {e}", exc_info=True)
-    
-    if user_photo:
-        from pathlib import Path as PathLib
-        if PathLib(user_photo).exists():
-            # Check if message contains ID-related keywords or data
-            id_keywords = ['texas', 'florida', 'california', 'id', 'driver', 'license', 'dl', 'identification', 'generate id', 'create id', 'state id']
-            has_id_keyword = any(keyword in message_lower for keyword in id_keywords)
-            
-            # Check saved state for requested state (from previous messages)
-            requested_state_from_history = None
-            try:
-                from user_state_manager import get_user_state_manager
-                state_mgr = get_user_state_manager(db)
-                state_history = state_mgr.get_state(user_id, 'requested_state')
-                if state_history and state_history.get('value'):
-                    requested_state_from_history = state_history['value']
-                    logger.info(f"Found saved requested state: {requested_state_from_history}")
-            except Exception as e:
-                logger.debug(f"Could not load requested state from history: {e}")
-            
-            # Also check current message for state keywords (in case user mentions state in data message)
-            state_keywords_check = {
-                'texas': ['texas', 'tx'],
-                'florida': ['florida', 'fl'],
-                'california': ['california', 'ca'],
-                'new york': ['new york', 'ny', 'newyork'],
-                'illinois': ['illinois', 'il'],
-                'ohio': ['ohio', 'oh'],
-                'pennsylvania': ['pennsylvania', 'pa'],
-                'georgia': ['georgia', 'ga'],
-                'michigan': ['michigan', 'mi']
-            }
-            
-            # If state detected in current message, save it
-            for state, keywords in state_keywords_check.items():
-                if any(keyword in message_lower for keyword in keywords):
-                    try:
-                        from user_state_manager import get_user_state_manager
-                        state_mgr = get_user_state_manager(db)
-                        state_mgr.save_state(user_id, 'requested_state', state)
-                        requested_state_from_history = state
-                        logger.info(f"Detected and saved state from current message: {state}")
-                    except Exception as e:
-                        logger.warning(f"Could not save detected state: {e}")
-                    break
-            
-            # Check if message looks like ID data (name, DOB, address pattern)
-            import re
-            # More flexible name detection: "NAME" keyword or capitalized words at start
-            has_name = bool(re.search(r'(?:name[:\s]+)?([A-Z][A-Z\s]+)', user_message)) or bool(re.search(r'^([A-Z][A-Z\s]{3,})', user_message))
-            # DOB detection: MM/DD/YYYY or MM-DD-YYYY
-            has_dob = bool(re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', user_message))
-            # Address detection: number + street name (Rd, St, Ave, Road, Street, etc.)
-            has_address = bool(re.search(r'\d+\s+[A-Za-z]+.*?(?:rd|st|ave|road|street|blvd|boulevard|drive|dr|ln|lane|ct|court|way|pl|place)', user_message, re.I))
-            
-            # If user mentions ID or has ID data pattern, auto-generate
-            if has_id_keyword or (has_name and (has_dob or has_address)):
-                try:
-                    # Extract user data from message OR use saved state
-                    user_data = {}
-                    
-                    # First, try to get saved user data from state
-                    saved_data = context.user_data.get('saved_user_data', {})
-                    if not saved_data:
-                        try:
-                            from user_state_manager import get_user_state_manager
-                            state_mgr = get_user_state_manager(db)
-                            user_data_state = state_mgr.get_state(user_id, 'user_data')
-                            if user_data_state:
-                                saved_data = user_data_state.get('value', {})
-                        except Exception as e:
-                            logger.warning(f"Could not load saved user data: {e}")
-                    
-                    if saved_data:
-                        user_data.update(saved_data)
-                        logger.info(f"Using saved user data: {user_data}")
-                    
-                    # Then, extract/override from current message
-                    # Extract name - prioritize "Name:" pattern, then first line
-                    # Pattern: "Name: Dawn Price" - match everything after "Name:" until newline
-                    name_match = re.search(r'(?:^|\n)\s*name[:\s]+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+)', user_message, re.I | re.MULTILINE)
-                    if not name_match:
-                        # Try pattern without "Name:" keyword (first capitalized words at start)
-                        name_match = re.search(r'^([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+)', user_message, re.MULTILINE)
-                    if name_match:
-                        name = name_match.group(1).strip().upper()
-                        # Remove "NAME" keyword if present
-                        name = re.sub(r'^NAME\s+', '', name, flags=re.I)
-                        # Don't use if it's just "DOB" or other keywords, and require at least 2 words
-                        excluded_keywords = ['DOB', 'ADDRESS', 'LICENSE', 'EXPIRATION', 'ISSUE', 'SEX', 'HEIGHT', 'WEIGHT', 'CLASS', 'RESTRICTIONS', 'DATE']
-                        if name and name not in excluded_keywords and len(name.split()) >= 2:
-                            user_data['name'] = name
-                            logger.info(f"Extracted name: {name}")
-                    
-                    # Extract DOB
-                    dob_match = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', user_message)
-                    if dob_match:
-                        month, day, year = dob_match.groups()
-                        if len(year) == 2:
-                            year = '20' + year if int(year) < 50 else '19' + year
-                        user_data['dob'] = f"{month}/{day}/{year}"
-                    
-                    # Extract address - more flexible pattern
-                    address_match = re.search(r'(\d+\s+[A-Za-z\s]+(?:rd|st|ave|road|street|blvd|boulevard|drive|dr|ln|lane|ct|court|way|pl|place)[^,\n]*)', user_message, re.I)
-                    if address_match:
-                        full_address = address_match.group(1).strip()
-                        # Try to extract city, state, zip if present
-                        city_state_zip = re.search(r',\s*([A-Za-z]+),?\s*([A-Z]{2})?\s*(\d{5})?', user_message[address_match.end():], re.I)
-                        if city_state_zip:
-                            city = city_state_zip.group(1).strip() if city_state_zip.group(1) else ""
-                            state = city_state_zip.group(2).strip() if city_state_zip.group(2) else ""
-                            zip_code = city_state_zip.group(3).strip() if city_state_zip.group(3) else ""
-                            user_data['address'] = full_address
-                            if city:
-                                user_data['city'] = city
-                            if state:
-                                user_data['state'] = state
-                            if zip_code:
-                                user_data['zip'] = zip_code
-                        else:
-                            user_data['address'] = full_address
-                    else:
-                        # Fallback: try to find address pattern without street type
-                        address_match = re.search(r'(\d+\s+[A-Za-z\s]+)(?:,\s*([A-Za-z]+))?(?:,\s*([A-Z]{2}))?(?:\s+(\d{5}))?', user_message, re.I)
-                        if address_match:
-                            street = address_match.group(1).strip()
-                            city = address_match.group(2).strip() if address_match.group(2) else ""
-                            state = address_match.group(3).strip() if address_match.group(3) else ""
-                            zip_code = address_match.group(4).strip() if address_match.group(4) else ""
-                            user_data['address'] = street
-                            if city:
-                                user_data['city'] = city
-                            if state:
-                                user_data['state'] = state
-                            if zip_code:
-                                user_data['zip'] = zip_code
-                    
-                    # Detect which state ID the user wants from message
-                    state_keywords = {
-                        'texas': ['texas', 'tx'],
-                        'florida': ['florida', 'fl'],
-                        'california': ['california', 'ca'],
-                        'new york': ['new york', 'ny', 'newyork'],
-                        'illinois': ['illinois', 'il'],
-                        'ohio': ['ohio', 'oh'],
-                        'pennsylvania': ['pennsylvania', 'pa'],
-                        'georgia': ['georgia', 'ga'],
-                        'michigan': ['michigan', 'mi']
-                    }
-                    
-                    requested_state = None
-                    for state, keywords in state_keywords.items():
-                        if any(keyword in message_lower for keyword in keywords):
-                            requested_state = state
-                            break
-                    
-                    # Also check user_data for state
-                    if not requested_state and user_data.get('state'):
-                        state_abbr = user_data['state'].upper()
-                        state_map = {'TX': 'texas', 'FL': 'florida', 'CA': 'california', 'NY': 'new york', 
-                                    'IL': 'illinois', 'OH': 'ohio', 'PA': 'pennsylvania', 'GA': 'georgia', 'MI': 'michigan'}
-                        if state_abbr in state_map:
-                            requested_state = state_map[state_abbr]
-                    
-                    # Default to Texas if no state specified
-                    if not requested_state:
-                        requested_state = 'texas'
-                    
-                    # Check database for the requested state template
-                    from template_manager import get_template_manager
-                    tm = get_template_manager(db)
-                    
-                    # Search for state-specific ID template
-                    template = None
-                    all_templates = tm.list_templates(template_type='id')
-                    for t in all_templates:
-                        if isinstance(t, dict):
-                            name = t.get('name', '').lower()
-                            desc = t.get('description', '').lower()
-                            # Check if template matches requested state
-                            if requested_state in name or requested_state in desc:
-                                template = t
-                                break
-                    
-                    # If no state-specific template found, try to get any ID template
-                    if not template:
-                        for t in all_templates:
-                            if isinstance(t, dict):
-                                name = t.get('name', '').lower()
-                                if 'id' in name or 'driver' in name or 'license' in name:
-                                    template = t
-                                    break
-                    
-                    # Generate template name based on state
-                    template_name_map = {
-                        'texas': 'texas_dl',
-                        'florida': 'florida_dl',
-                        'california': 'california_dl',
-                        'new york': 'newyork_id',
-                        'illinois': 'illinois_dl',
-                        'ohio': 'ohio_dl',
-                        'pennsylvania': 'pennsylvania_dl',
-                        'georgia': 'georgia_dl',
-                        'michigan': 'michigan_dl'
-                    }
-                    template_name = template.get('name', template_name_map.get(requested_state, 'texas_dl')) if template else template_name_map.get(requested_state, 'texas_dl')
-                    
-                    # Save user data to state for persistence
-                    try:
-                        from user_state_manager import get_user_state_manager
-                        state_mgr = get_user_state_manager(db)
-                        state_mgr.save_state(user_id, 'user_data', user_data)
-                        logger.info(f"Saved user data to state: {user_data}")
-                    except Exception as e:
-                        logger.warning(f"Could not save user data to state: {e}")
-                    
-                    # Generate ID
-                    state_display = requested_state.replace('_', ' ').title() if requested_state else 'ID'
-                    await update.message.reply_text(f"🔄 Detected photo + ID data! Generating {state_display} ID...")
-                    
-                    from id_template_processor import get_id_processor
-                    id_processor = get_id_processor()
-                    
-                    filepath = id_processor.process_texas_id_with_photo(
-                        user_photo,
-                        template_name=template_name,
-                        user_data=user_data
-                    )
-                    
-                    if filepath and PathLib(filepath).exists():
-                        # Verify file is not empty
-                        file_size = PathLib(filepath).stat().st_size
-                        if file_size == 0:
-                            logger.error(f"Generated ID file is empty: {filepath}")
-                            await update.message.reply_text("❌ Generated ID file is empty. Please try again.")
-                            return
-                        
-                        # Send the generated ID as photo (better display in Telegram)
-                        file_ext = PathLib(filepath).suffix.lower()
-                        if file_ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp']:
-                            # Send as photo for better Telegram display
-                            with open(filepath, 'rb') as f:
-                                await update.message.reply_photo(
-                                    photo=f,
-                                    caption=f"✅ **{state_display} ID Generated**\n\n"
-                                           f"Name: {user_data.get('name', 'N/A')}\n"
-                                           f"DOB: {user_data.get('dob', 'N/A')}\n"
-                                           f"Address: {user_data.get('address', 'N/A')}",
-                                    parse_mode='Markdown'
-                                )
-                        else:
-                            # Send as document for non-image formats
-                            with open(filepath, 'rb') as f:
-                                await update.message.reply_document(
-                                    document=f,
-                                    filename=PathLib(filepath).name,
-                                    caption=f"✅ **{state_display} ID Generated**\n\n"
-                                           f"Name: {user_data.get('name', 'N/A')}\n"
-                                           f"DOB: {user_data.get('dob', 'N/A')}\n"
-                                           f"Address: {user_data.get('address', 'N/A')}",
-                                    parse_mode='Markdown'
-                                )
-                        logger.info(f"Auto-generated and sent ID: {filepath} (size: {file_size} bytes)")
-                        
-                        # Mark result as delivered in state
-                        try:
-                            from user_state_manager import get_user_state_manager
-                            state_mgr = get_user_state_manager(db)
-                            state_mgr.mark_result_delivered(user_id, 'id_image', filepath)
-                            state_mgr.clear_pending_task(user_id)
-                        except Exception as e:
-                            logger.warning(f"Could not update state: {e}")
-                        
-                        # Keep photo in state for future use (don't delete from context)
-                        return
-                    else:
-                        logger.warning(f"ID generation failed, filepath: {filepath}")
-                        # Continue to normal message handling
-                except Exception as e:
-                    logger.error(f"Error auto-generating ID: {e}", exc_info=True)
-                    # Continue to normal message handling
     
     # Check if admin is searching for a user by ID
     pending_search_key = f'pending_search_{user_id}'
@@ -6090,16 +3818,7 @@ You've used all your available requests.
         
         # Use desktop AI handler (full desktop app approach)
         try:
-            try:
-                from desktop_ai_handler import DesktopAIHandler
-                DESKTOP_HANDLER_AVAILABLE = True
-            except ImportError:
-                DESKTOP_HANDLER_AVAILABLE = False
-                logger.warning("DesktopAIHandler not available, using basic streaming")
-            
-            if not DESKTOP_HANDLER_AVAILABLE:
-                # Fallback to basic streaming without DesktopAIHandler
-                raise ImportError("DesktopAIHandler not available")
+            from desktop_ai_handler import DesktopAIHandler
             
             # Get workspace for user (isolated per-user workspace for concurrent safety)
             # Use UserWorkspaceManager for proper isolation
@@ -6110,24 +3829,20 @@ You've used all your available requests.
                 workspace = str(user_workspace)
             except ImportError:
                 # Fallback if UserWorkspaceManager not available
-                # On Railway/Linux, default to /app if WORKSPACE_ROOT not set
-                import sys
-                if sys.platform == 'linux' or sys.platform.startswith('linux'):
-                    # Railway/Linux: use /app as base if WORKSPACE_ROOT not set
-                    default_base = '/app' if os.path.exists('/app') else os.getcwd()
-                else:
-                    default_base = os.getcwd()
-                base_workspace = os.getenv('WORKSPACE_ROOT', default_base)
+                base_workspace = os.getenv('WORKSPACE_ROOT', os.getcwd())
                 workspace = os.path.join(base_workspace, f"user_{user_id}")
                 os.makedirs(workspace, exist_ok=True)
-                logger.warning(f"UserWorkspaceManager not available, using fallback workspace isolation: {workspace}")
+                logger.warning("UserWorkspaceManager not available, using fallback workspace isolation")
             
-            if DESKTOP_HANDLER_AVAILABLE:
-                logger.info(f"Initializing DesktopAIHandler for user {user_id} with workspace: {workspace}")
-                desktop_handler = DesktopAIHandler(brain, workspace_root=workspace, user_id=user_id)
-                logger.info(f"DesktopAIHandler initialized successfully for user {user_id}")
-            else:
-                raise ImportError("DesktopAIHandler not available")
+            logger.info(f"Initializing DesktopAIHandler for user {user_id} with workspace: {workspace}")
+            desktop_handler = DesktopAIHandler(brain, workspace_root=workspace, user_id=user_id)
+            logger.info(f"DesktopAIHandler initialized successfully for user {user_id}")
+            
+            # Set task start time (ensure time module is not shadowed)
+            if hasattr(context, 'user_data'):
+                # Use imported time module explicitly to avoid UnboundLocalError
+                import time as time_module
+                context.user_data['task_start_time'] = time_module.time()
             
             # Load memory context and store user message
             if SECURE_MEMORY_AVAILABLE and secure_memory:
@@ -6149,758 +3864,26 @@ You've used all your available requests.
             )
             
             try:
-                # Store task information for summary generation
-                context.user_data['task_start_time'] = time.time()
-                context.user_data['last_task_description'] = user_message
-                context.user_data['last_task_results'] = {}
-                
-                # Create progress streamer for long tasks (60 seconds = 1 minute to avoid Telegram rate limits)
-                try:
-                    from progress_streamer import create_progress_streamer
-                    progress_streamer = create_progress_streamer(update=update, context=context, update_interval=60)
-                    context.user_data['progress_streamer'] = progress_streamer
-                except Exception as e:
-                    logger.warning(f"Could not create progress streamer: {e}")
-                    progress_streamer = None
-                
-                # CONTINUOUS EXECUTION: Keep executing until results are delivered
-                try:
-                    from continuous_executor import get_continuous_executor
-                    from user_state_manager import get_user_state_manager
+                # Handle with concurrency management for 500+ users
+                if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
+                    async def process_message():
+                        return await desktop_handler.handle_with_streaming(
+                            user_message,
+                            update,
+                            context
+                        )
                     
-                    continuous_exec = get_continuous_executor(max_iterations=5, check_interval=3.0)
-                    state_mgr = get_user_state_manager(db)
-                    
-                    # Determine expected results based on task
-                    expected_results = []
-                    message_lower = user_message.lower()
-                    if 'id' in message_lower or 'driver' in message_lower or 'license' in message_lower:
-                        expected_results = ['id_image', 'file']
-                    elif 'generate' in message_lower or 'create' in message_lower:
-                        expected_results = ['file', 'script']
-                    elif 'scan' in message_lower or 'check' in message_lower:
-                        expected_results = ['file', 'report']
-                    else:
-                        expected_results = ['message']  # At minimum, expect a response message
-                    
-                    # Save current project if detected
-                    if 'project' in message_lower or 'working' in message_lower:
-                        # Try to detect project name
-                        project_name = f"user_{user_id}_project_{int(time.time())}"
-                        state_mgr.save_current_project(user_id, project_name, 'general', workspace)
-                    
-                    # Execute with continuous checking and command execution
-                    async def execute_task():
-                        """Execute task with automatic command execution (Cursor-style)"""
-                        logger.info(f"[AI-WORKFLOW] Starting task execution for user {user_id}")
-                        logger.info(f"[AI-WORKFLOW] User message: {user_message[:200]}...")
-                        logger.info(f"[AI-WORKFLOW] Workspace: {workspace}")
-                        
-                        try:
-                            # Import command execution modules
-                            from command_executor import get_command_executor
-                            from ai_response_parser import get_ai_response_parser
-                            from auto_retry_manager import get_auto_retry_manager
-                            from telegram_rate_limiter import get_telegram_rate_limiter
-                            
-                            logger.info(f"[AI-WORKFLOW] Initializing command executor and parsers...")
-                            command_executor = get_command_executor(workspace)
-                            response_parser = get_ai_response_parser()
-                            retry_manager = get_auto_retry_manager()
-                            rate_limiter = get_telegram_rate_limiter()
-                            logger.info(f"[AI-WORKFLOW] Command executor and parsers initialized")
-                            
-                            # Get available tools info for AI
-                            try:
-                                from tool_detector import get_tool_detector
-                                logger.info(f"[TOOL-DETECT] Detecting available tools...")
-                                tool_detector = get_tool_detector()
-                                tools_info = tool_detector.get_tools_summary()
-                                logger.info(f"[TOOL-DETECT] Tools detected and formatted for AI")
-                                # Add tools info to user message for AI context
-                                enhanced_message = f"{user_message}\n\n{tools_info}\n\n**IMPORTANT:** Use all available tools listed above. Check tool availability with 'which <tool>' if needed."
-                            except Exception as e:
-                                logger.warning(f"[TOOL-DETECT] Could not get tools info: {e}")
-                                enhanced_message = user_message
-                            
-                            # Initialize memory bank (Cursor-style external memory)
-                            from memory_bank import get_memory_bank
-                            memory_bank = get_memory_bank(workspace, user_id)
-                            memory_bank.store_task_context(
-                                task_description=user_message,
-                                current_step="Initializing",
-                                completed_steps=[],
-                                next_steps=["Reconnaissance", "Scanning", "Testing", "Exploitation"]
-                            )
-                            logger.info(f"[MEMORY-BANK] Memory bank initialized for user {user_id}")
-                            
-                            # Initialize task focus manager to track and filter updates
-                            from task_focus_manager import get_task_focus_manager, TaskStatus
-                            task_focus = get_task_focus_manager(user_id, user_message)
-                            task_focus.update_status(TaskStatus.STARTING, "Initializing attack plan")
-                            logger.info(f"[TASK-FOCUS] Task focus initialized for user {user_id}: {user_message[:100]}")
-                            
-                            # Get initial AI response (with filtered streaming)
-                            logger.info(f"[AI-GENERATE] Requesting AI response from DeepSeek...")
-                            logger.info(f"[AI-GENERATE] Enhanced message length: {len(enhanced_message)} chars")
-                            
-                            # Create filtered streaming wrapper with memory bank context
-                            async def filtered_streaming_handler(message, update_obj, context_obj):
-                                """Wrapper that filters streaming updates and uses memory bank"""
-                                full_response = ""
-                                last_sent = ""
-                                
-                                # Get memory bank context (Cursor-style context building)
-                                memory_context = memory_bank.get_context_for_ai(max_tokens=1500)
-                                
-                                # Enhance message with memory context
-                                enhanced_with_memory = f"""{memory_context}
-
-**Current Request:**
-{message}
-
-**Instructions:** Use the context above to maintain focus on the task. Reference previous decisions and completed steps."""
-                                
-                                # Get AI response chunks
-                                from HacxGPT import get_brain
-                                brain = get_brain()
-                                
-                                # SUPPRESS ALL STREAMING DURING AI RESPONSE - only send final result
-                                # This prevents hundreds of messages during response generation
-                                for chunk in brain.chat(enhanced_with_memory):
-                                    full_response += chunk
-                                    # DO NOT send updates during streaming - wait for complete response
-                                
-                                # Only send ONE update after complete response (if significant)
-                                if task_focus.should_send_update(full_response):
-                                    filtered = task_focus.filter_content_for_telegram(full_response)
-                                    if filtered:
-                                        try:
-                                            # Check rate limits before sending
-                                            from telegram_rate_limit_manager import get_rate_limit_manager
-                                            rate_limit_mgr = get_rate_limit_manager()
-                                            chat_id = update_obj.effective_chat.id if update_obj.effective_chat else None
-                                            
-                                            if chat_id and rate_limit_mgr.is_paused(chat_id):
-                                                pause_remaining = rate_limit_mgr.get_pause_remaining(chat_id)
-                                                task_focus.mark_rate_limited(int(pause_remaining) if pause_remaining else 60)
-                                                logger.warning(f"[TASK-FOCUS] Rate limited - skipping update, paused for {pause_remaining:.1f}s")
-                                            else:
-                                                # Send only ONE meaningful update after complete response
-                                                await update_obj.message.reply_text(
-                                                    f"**{task_focus.current_step}**\n\n{filtered[:1500]}...",
-                                                    parse_mode='Markdown'
-                                                )
-                                                task_focus.last_update_time = time.time()
-                                                task_focus.last_sent_message = filtered
-                                                logger.info(f"[TASK-FOCUS] Sent single update after complete response: {task_focus.current_step}")
-                                                
-                                                # Record successful send
-                                                if chat_id:
-                                                    rate_limit_mgr.record_successful_send(chat_id)
-                                        except Exception as e:
-                                            error_str = str(e).lower()
-                                            if '429' in error_str or 'rate limit' in error_str or 'too many requests' in error_str:
-                                                # Extract retry_after if available
-                                                retry_after = 120  # Default 2 minutes
-                                                if 'retry_after' in error_str:
-                                                    import re
-                                                    match = re.search(r'retry_after[:\s]+(\d+)', error_str)
-                                                    if match:
-                                                        retry_after = int(match.group(1)) + 10  # Add buffer
-                                                
-                                                task_focus.mark_rate_limited(retry_after)
-                                                if chat_id:
-                                                    rate_limit_mgr.record_rate_limit(chat_id, retry_after)
-                                                logger.error(f"[TASK-FOCUS] Rate limited - pausing ALL updates for {retry_after}s")
-                                            elif '400' in error_str or 'bad request' in error_str:
-                                                logger.error(f"[TASK-FOCUS] 400 Bad Request - stopping updates for this message")
-                                                # Don't retry 400 errors
-                                            else:
-                                                logger.warning(f"[TASK-FOCUS] Error sending update: {e}")
-                                
-                                # Store decision in memory bank
-                                memory_bank.store_decision(
-                                    decision="Generated initial response",
-                                    reasoning=full_response[:200],
-                                    context=user_message
-                                )
-                                
-                                return full_response
-                            
-                            if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
-                                logger.info(f"[AI-GENERATE] Using concurrency manager for request")
-                                async def process_message():
-                                    return await filtered_streaming_handler(enhanced_message, update, context)
-                                
-                                ai_response = await concurrency_manager.process_request(
-                                    user_id,
-                                    process_message
-                                )
-                            else:
-                                logger.info(f"[AI-GENERATE] Direct AI handler call (no concurrency manager)")
-                                ai_response = await filtered_streaming_handler(enhanced_message, update, context)
-                            
-                            logger.info(f"[AI-GENERATE] AI response received: {len(ai_response)} chars")
-                            logger.info(f"[AI-GENERATE] Response preview: {ai_response[:300]}...")
-                            
-                            # Parse AI response for commands
-                            logger.info(f"[AI-PARSE] Parsing AI response for commands and code blocks...")
-                            parsed = response_parser.parse_ai_response(ai_response)
-                            logger.info(f"[AI-PARSE] Parsed response - Commands: {len(parsed.get('commands', []))}, Code blocks: {len(parsed.get('code_blocks', []))}, Complete: {parsed.get('is_complete', False)}")
-                            
-                            if parsed.get('commands'):
-                                logger.info(f"[AI-PARSE] Commands found: {[cmd[:50] + '...' if len(cmd) > 50 else cmd for cmd in parsed['commands'][:5]]}")
-                            
-                            # Validate and test code blocks before execution
-                            from code_validator import get_code_validator
-                            from test_generator import get_test_generator
-                            
-                            validator = get_code_validator()
-                            test_gen = get_test_generator()
-                            
-                            # Process code blocks: validate, test, and GENERATE FILES
-                            code_blocks_to_generate = []
-                            
-                            for block in parsed.get('code_blocks', []):
-                                language = block.get('language', 'bash')
-                                content = block.get('content', '')
-                                
-                                if not content:
-                                    continue
-                                
-                                # Validate code
-                                validation_result = validator.validate_code(content, language)
-                                block['validation'] = validation_result
-                                
-                                # Auto-fix if needed
-                                if not validation_result.get('valid', True):
-                                    config = validator.config
-                                    if config.get('validation', {}).get('auto_fix', True):
-                                        fixed_content, was_fixed = validator.auto_fix_code(
-                                            content,
-                                            language,
-                                            validation_result.get('errors', [])
-                                        )
-                                        if was_fixed:
-                                            block['content'] = fixed_content
-                                            logger.info(f"Auto-fixed {language} code block")
-                                
-                                # Generate and run tests if enabled
-                                config = validator.config
-                                if config.get('testing', {}).get('generate_tests', True):
-                                    try:
-                                        test_code = test_gen.generate_tests(content, language)
-                                        test_results = test_gen.run_tests(content, test_code, language, workspace)
-                                        block['test_results'] = test_results
-                                        
-                                        if not test_results.get('passed', True) and test_results.get('failures'):
-                                            # Analyze failures and suggest fixes
-                                            suggestions = test_gen.analyze_test_failures(test_results)
-                                            block['test_suggestions'] = suggestions
-                                            logger.info(f"Tests failed for {language} code block: {len(suggestions)} suggestions")
-                                    except Exception as e:
-                                        logger.warning(f"Error generating/running tests: {e}")
-                                
-                                # Add to list for file generation
-                                code_blocks_to_generate.append(block)
-                            
-                            # ACTUALLY GENERATE FILES FROM CODE BLOCKS
-                            if code_blocks_to_generate:
-                                try:
-                                    from file_generator import FileGenerator
-                                    file_gen = FileGenerator(str(workspace))
-                                    
-                                    # Generate files
-                                    generated_files = file_gen.generate_files(
-                                        code_blocks_to_generate,
-                                        subdirectory=None,
-                                        validate=False  # Already validated above
-                                    )
-                                    
-                                    # Add to context for sending
-                                    if 'generated_files' not in context.user_data:
-                                        context.user_data['generated_files'] = []
-                                    
-                                    for gen_file in generated_files:
-                                        if gen_file.get('full_path'):
-                                            context.user_data['generated_files'].append(gen_file['full_path'])
-                                            logger.info(f"Generated file added to send queue: {gen_file['full_path']}")
-                                    
-                                    logger.info(f"Generated {len(generated_files)} files from code blocks")
-                                except Exception as e:
-                                    logger.error(f"Error generating files from code blocks: {e}", exc_info=True)
-                            
-                            # If no commands, return response as-is
-                            if not parsed['commands']:
-                                logger.debug("No commands found in AI response")
-                                return ai_response
-                            
-                            # Update memory bank with current step
-                            memory_bank.update_task_progress("Command Execution", "in_progress")
-                            memory_bank.store_decision(
-                                decision=f"Executing {len(parsed.get('commands', []))} commands",
-                                reasoning="Parsed AI response and extracted commands for execution",
-                                context=f"Commands: {len(parsed.get('commands', []))}, Code blocks: {len(parsed.get('code_blocks', []))}"
-                            )
-                            
-                            # Execute commands automatically
-                            logger.info(f"[CMD-EXEC] Found {len(parsed['commands'])} commands in AI response, starting execution...")
-                            
-                            execution_results = []
-                            conversation_context = user_message
-                            max_iterations = 10
-                            iteration = 0
-                            
-                            while iteration < max_iterations:
-                                iteration += 1
-                                logger.info(f"[AUTO-CONTINUE] Iteration {iteration}/{max_iterations} - Processing {len(parsed.get('commands', []))} commands")
-                                
-                                # Update progress
-                                if progress_streamer:
-                                    progress_streamer.update_progress(
-                                        f"Executing commands (iteration {iteration}/{max_iterations})",
-                                        progress_pct=int((iteration / max_iterations) * 50),
-                                        details=f"Found {len(parsed['commands'])} commands"
-                                    )
-                                    await progress_streamer.send_progress_update()
-                                
-                                # Execute all commands (suppress individual command updates)
-                                for i, command in enumerate(parsed['commands'], 1):
-                                    logger.info(f"[CMD-EXEC] Executing command {i}/{len(parsed['commands'])}: {command[:100]}...")
-                                    logger.info(f"[CMD-EXEC] Command full: {command}")
-                                    
-                                    # Don't send individual command updates to Telegram (suppressed by task focus)
-                                    
-                                    # Execute with retry
-                                    max_retries = 3
-                                    executed = False
-                                    
-                                    for attempt in range(max_retries):
-                                        logger.info(f"[CMD-EXEC] Attempt {attempt + 1}/{max_retries} for command {i}")
-                                        result = command_executor.execute_command(
-                                            command,
-                                            cwd=workspace,
-                                            timeout=300,
-                                            verify=True
-                                        )
-                                        
-                                        execution_results.append(result)
-                                        
-                                        # Log detailed execution results
-                                        logger.info(f"[CMD-RESULT] Command {i} result - Exit code: {result.get('exit_code')}, Success: {result.get('success')}, Verified: {result.get('verified')}")
-                                        if result.get('stdout'):
-                                            logger.info(f"[CMD-RESULT] Command {i} stdout (first 500 chars): {result.get('stdout', '')[:500]}")
-                                        if result.get('stderr'):
-                                            logger.warning(f"[CMD-RESULT] Command {i} stderr: {result.get('stderr', '')[:500]}")
-                                        if result.get('error'):
-                                            logger.error(f"[CMD-RESULT] Command {i} error: {result.get('error')}")
-                                        
-                                        # Check if verified (actually ran)
-                                        if result.get('verified', False) and result.get('success', False):
-                                            executed = True
-                                            logger.info(f"[CMD-SUCCESS] Command {i} executed and verified successfully")
-                                            break
-                                        else:
-                                            logger.warning(f"[CMD-RETRY] Command {i} failed verification or execution - Success: {result.get('success')}, Verified: {result.get('verified')}")
-                                            # Try alternative
-                                            if attempt < max_retries - 1:
-                                                error_msg = result.get('error', '') or result.get('stderr', '') or 'Verification failed'
-                                                logger.info(f"[CMD-RETRY] Getting alternative command for: {error_msg[:200]}")
-                                                alt_command = retry_manager.retry_with_alternative(command, error_msg, attempt + 1)
-                                                if alt_command and alt_command != command:
-                                                    logger.info(f"[CMD-RETRY] Trying alternative command: {alt_command[:100]}...")
-                                                    command = alt_command
-                                                await asyncio.sleep(1)
-                                    
-                                    if not executed:
-                                        logger.error(f"[CMD-FAIL] Command {i} failed after {max_retries} attempts: {command[:100]}...")
-                                
-                                # Format results for AI
-                                results_summary = "\n".join([
-                                    f"Command: {r['command']}\n"
-                                    f"Exit code: {r.get('exit_code', 'N/A')}\n"
-                                    f"Output: {r.get('stdout', '')[:500]}\n"
-                                    f"Error: {r.get('stderr', '')[:200]}\n"
-                                    f"Verified: {'Yes' if r.get('verified', False) else 'No'}\n"
-                                    for r in execution_results[-len(parsed['commands']):]
-                                ])
-                                
-                                # Check if task complete
-                                if parsed['is_complete']:
-                                    memory_bank.update_task_progress("Task Complete", "completed")
-                                    memory_bank.store_decision(
-                                        decision="Task marked complete by AI",
-                                        reasoning="AI confirmed all objectives met",
-                                        context=f"Completed after {iteration} iterations"
-                                    )
-                                    logger.info(f"[AI-COMPLETE] Task marked as complete by AI at iteration {iteration}")
-                                    break
-                                
-                                # Check rate limits before sending progress update
-                                try:
-                                    from telegram_rate_limit_manager import get_rate_limit_manager
-                                    rate_limit_mgr = get_rate_limit_manager()
-                                    chat_id = update.effective_chat.id if update.effective_chat else None
-                                    
-                                    if chat_id and rate_limit_mgr.is_paused(chat_id):
-                                        pause_remaining = rate_limit_mgr.get_pause_remaining(chat_id)
-                                        logger.info(f"[RATE-LIMIT] Updates paused for chat {chat_id}, remaining: {pause_remaining:.1f}s")
-                                        # Wait for pause to end
-                                        if pause_remaining and pause_remaining > 0:
-                                            await asyncio.sleep(min(pause_remaining, 60))  # Wait up to 60s
-                                    elif chat_id and rate_limit_mgr.should_send_update(chat_id):
-                                        # Send progress update every minute
-                                        if progress_streamer:
-                                            logger.debug(f"[PROG-UPDATE] Sending progress update (iteration {iteration})")
-                                            await progress_streamer.send_progress_update(force=False)
-                                            rate_limit_mgr.record_successful_send(chat_id)
-                                except Exception as e:
-                                    logger.warning(f"[RATE-LIMIT] Error checking rate limits: {e}")
-                                    # Fallback: send update anyway
-                                    if progress_streamer:
-                                        await progress_streamer.send_progress_update(force=False)
-                                
-                                # Feed results back to AI and get next response (AUTO-CONTINUATION)
-                                logger.info(f"[AUTO-CONTINUE] Auto-prompting AI for continuation (iteration {iteration}/{max_iterations})")
-                                logger.info(f"[AUTO-CONTINUE] Execution results summary length: {len(results_summary)} chars")
-                                logger.info(f"[AUTO-CONTINUE] Total commands executed so far: {len(execution_results)}")
-                                
-                                # Get available tools info for AI
-                                try:
-                                    from tool_detector import get_tool_detector
-                                    tool_detector = get_tool_detector()
-                                    tools_info = tool_detector.get_tools_summary()
-                                    logger.info(f"[AUTO-CONTINUE] Tools info included in continuation prompt")
-                                except Exception as e:
-                                    logger.warning(f"[AUTO-CONTINUE] Could not get tools info: {e}")
-                                    tools_info = ""
-                                
-                                # Get memory bank context for continuation (plan → act loop)
-                                memory_context = memory_bank.get_context_for_ai(max_tokens=1000)
-                                
-                                next_prompt = f"""{memory_context}
-
-**Previous commands executed. Results:**
-{results_summary}
-
-{tools_info}
-
-**AUTO-CONTINUATION MODE:** Continue executing commands automatically. Don't wait for user input.
-- Reference the memory context above to maintain focus on the original task
-- If commands are still running, check their status and provide updates
-- If more work is needed, generate and execute the next commands immediately
-- Only say "Task complete" when ALL work is truly finished and results are delivered
-- Use all available tools on the system (listed above)
-
-Continue with next steps NOW. Execute commands immediately."""
-                                
-                                # Store decision to continue
-                                memory_bank.store_decision(
-                                    decision="Auto-continuing task execution",
-                                    reasoning=f"Completed iteration {iteration}, continuing with next steps",
-                                    context=f"Results: {len(execution_results)} commands executed"
-                                )
-                                
-                                logger.info(f"[AUTO-CONTINUE] Continuation prompt length: {len(next_prompt)} chars")
-                                
-                                # Get next AI response (AUTO-PROMPT)
-                                try:
-                                    logger.info(f"[AI-GENERATE] Requesting continuation response from AI...")
-                                    next_response = ""
-                                    chunk_count = 0
-                                    for chunk in brain.chat(next_prompt):
-                                        next_response += chunk
-                                        chunk_count += 1
-                                        if chunk_count % 100 == 0:
-                                            logger.debug(f"[AI-GENERATE] Received {chunk_count} chunks, {len(next_response)} chars so far...")
-                                    
-                                    logger.info(f"[AI-GENERATE] Continuation response received: {len(next_response)} chars, {chunk_count} chunks")
-                                    logger.info(f"[AI-GENERATE] Continuation response preview: {next_response[:300]}...")
-                                    
-                                    # Parse next response
-                                    logger.info(f"[AI-PARSE] Parsing continuation response...")
-                                    parsed = response_parser.parse_ai_response(next_response)
-                                    logger.info(f"[AI-PARSE] Continuation parsed - Commands: {len(parsed.get('commands', []))}, Complete: {parsed.get('is_complete', False)}")
-                                    
-                                    # If no more commands and task complete, break
-                                    if not parsed['commands'] and parsed['is_complete']:
-                                        logger.info(f"[AI-COMPLETE] Task complete (no more commands) at iteration {iteration}")
-                                        break
-                                    
-                                    # If no more commands but not complete, auto-prompt again
-                                    if not parsed['commands'] and not parsed['is_complete']:
-                                        logger.info(f"[AUTO-CONTINUE] No commands in response but task not complete, auto-prompting again...")
-                                        await asyncio.sleep(2)
-                                        # Auto-prompt: Check status and continue
-                                        status_prompt = f"""Check the current status of the task. Previous results:
-{results_summary}
-
-Are there any more commands to execute? Check for:
-- Running processes that need monitoring
-- Files that need to be checked
-- Results that need to be analyzed
-- Next steps that need to be taken
-
-If task is complete, say "Task complete". Otherwise, generate and execute the next commands NOW."""
-                                        
-                                        status_response = ""
-                                        for chunk in brain.chat(status_prompt):
-                                            status_response += chunk
-                                        status_parsed = response_parser.parse_ai_response(status_response)
-                                        
-                                        if status_parsed['is_complete']:
-                                            logger.info("Task complete after status check")
-                                            break
-                                        elif status_parsed['commands']:
-                                            # Found more commands, continue with them
-                                            parsed = status_parsed
-                                            logger.info(f"Found {len(parsed['commands'])} more commands after status check")
-                                        else:
-                                            # Still no commands and not complete - wait a bit and try once more
-                                            await asyncio.sleep(3)
-                                            final_prompt = "Provide a final status update. If there are any remaining commands or checks needed, execute them now. If everything is complete, say 'Task complete'."
-                                            final_response = ""
-                                            for chunk in brain.chat(final_prompt):
-                                                final_response += chunk
-                                            final_parsed = response_parser.parse_ai_response(final_response)
-                                            if final_parsed['is_complete'] or not final_parsed['commands']:
-                                                break
-                                            else:
-                                                parsed = final_parsed
-                                    
-                                except Exception as e:
-                                    logger.error(f"Error getting next AI response: {e}", exc_info=True)
-                                    break
-                                
-                                # Brief delay before next iteration
-                                await asyncio.sleep(1)
-                            
-                            # Final verification: Check if all files are sent before completing
-                            logger.info(f"[COMPLETE-CHECK] Starting final completion verification...")
-                            
-                            # Check for generated files that need to be sent
-                            generated_files = context.user_data.get('generated_files', [])
-                            files_to_send = []
-                            if generated_files:
-                                from pathlib import Path
-                                for file_path in generated_files:
-                                    if file_path and Path(file_path).exists():
-                                        files_to_send.append(file_path)
-                                        logger.info(f"[COMPLETE-CHECK] File pending send: {file_path}")
-                            
-                            # If there are files to send, verify they're sent before completing
-                            if files_to_send:
-                                logger.info(f"[COMPLETE-CHECK] {len(files_to_send)} files need to be sent before task completion")
-                                # The files will be sent in the main handler after this function returns
-                                # We'll verify completion after files are sent
-                            
-                            # Final AI prompt to verify everything is done
-                            final_verification_prompt = f"""Final verification check:
-
-Commands executed: {len(execution_results)}
-Files generated: {len(files_to_send)}
-Results: {len(execution_results)} commands completed
-
-Verify:
-1. All commands have been executed successfully
-2. All files have been generated
-3. All results have been collected
-4. Task objectives have been met
-
-If EVERYTHING is complete and ready to send to user, say "Task complete - all files ready".
-Otherwise, list what still needs to be done."""
-                            
-                            try:
-                                logger.info(f"[COMPLETE-CHECK] Requesting final verification from AI...")
-                                verification_response = ""
-                                for chunk in brain.chat(final_verification_prompt):
-                                    verification_response += chunk
-                                
-                                verification_parsed = response_parser.parse_ai_response(verification_response)
-                                
-                                if verification_parsed.get('is_complete') or 'all files ready' in verification_response.lower():
-                                    logger.info(f"[COMPLETE-CHECK] AI confirmed task complete - all files ready")
-                                else:
-                                    logger.warning(f"[COMPLETE-CHECK] AI indicates more work needed: {verification_response[:200]}...")
-                            except Exception as e:
-                                logger.warning(f"[COMPLETE-CHECK] Error in final verification: {e}")
-                            
-                            # Update memory bank - task complete
-                            final_summary_text = f"Executed {len(execution_results)} commands, {sum(1 for r in execution_results if r.get('verified', False))} verified"
-                            if files_to_send:
-                                final_summary_text += f", {len(files_to_send)} files generated"
-                            memory_bank.mark_task_complete(final_summary_text)
-                            
-                            # Store final summary in memory bank
-                            memory_bank.store_summary(
-                                'task_completion',
-                                final_summary_text,
-                                metadata={
-                                    'commands_executed': len(execution_results),
-                                    'files_generated': len(files_to_send) if files_to_send else 0,
-                                    'iterations': iteration
-                                }
-                            )
-                            
-                            # Update task focus - completing
-                            task_focus.update_status(TaskStatus.COMPLETE, "Task completed")
-                            task_focus.commands_executed = len(execution_results)
-                            
-                            # Return final response with execution summary (filtered)
-                            final_summary = task_focus.get_summary()
-                            final_summary += f"\n\n**Commands Executed:** {len(execution_results)}\n**Verified:** {sum(1 for r in execution_results if r.get('verified', False))}"
-                            if files_to_send:
-                                final_summary += f"\n\n**Files Generated:** {len(files_to_send)} (will be sent)"
-                            
-                            # Clear task focus after completion
-                            from task_focus_manager import clear_task_focus
-                            clear_task_focus(user_id)
-                            
-                            return final_summary
-                            
-                        except Exception as e:
-                            logger.error(f"Error in command execution: {e}", exc_info=True)
-                            # Fallback to standard execution
-                            if CONCURRENCY_MANAGER_AVAILABLE and concurrency_manager:
-                                async def process_message():
-                                    return await desktop_handler.handle_with_streaming(
-                                        user_message,
-                                        update,
-                                        context
-                                    )
-                                
-                                return await concurrency_manager.process_request(
-                                    user_id,
-                                    process_message
-                                )
-                            else:
-                                return await desktop_handler.handle_with_streaming(
-                                    user_message,
-                                    update,
-                                    context
-                                )
-                    
-                    async def check_results(exec_result, expected, ws_path):
-                        """Check if results were delivered"""
-                        results = []
-                        
-                        # Check for files in workspace
-                        if ws_path and Path(ws_path).exists():
-                            workspace = Path(ws_path)
-                            
-                            # Check for ID images
-                            if 'id_image' in expected:
-                                id_files = list(workspace.rglob('*id*.png')) + list(workspace.rglob('*texas*.png'))
-                                if id_files:
-                                    results.append({'type': 'id_image', 'path': str(id_files[0])})
-                            
-                            # Check for generated files
-                            if 'file' in expected:
-                                py_files = list(workspace.rglob('*.py'))
-                                json_files = list(workspace.rglob('*.json'))
-                                if py_files or json_files:
-                                    results.append({'type': 'file', 'path': str(py_files[0] if py_files else json_files[0])})
-                        
-                        # Check if response was sent (basic check)
-                        if 'message' in expected and exec_result:
-                            results.append({'type': 'message', 'content': exec_result[:100]})
-                        
-                        return results
-                    
-                    # Execute continuously until results delivered
-                    exec_result = await continuous_exec.execute_until_delivered(
-                        task_description=user_message,
-                        execution_function=execute_task,
-                        expected_results=expected_results,
-                        result_checker=check_results,
-                        user_id=user_id,
-                        workspace_path=workspace
+                    cleaned_response = await concurrency_manager.process_request(
+                        user_id,
+                        process_message
                     )
-                    
-                    cleaned_response = exec_result.get('execution_result', '')
-                    delivered = exec_result.get('delivered_results', [])
-                    
-                    if exec_result.get('success'):
-                        logger.info(f"Task completed successfully: {len(delivered)} results delivered")
-                    else:
-                        logger.warning(f"Task may not be complete: {exec_result.get('message', 'Unknown')}")
-                    
-                except Exception as e:
-                    logger.warning(f"Continuous execution not available, using standard execution: {e}")
-                    # Fallback to standard execution with command execution
-                    try:
-                        # Get AI response first
-                        ai_response = ""
-                        for chunk in brain.chat(user_message):
-                            ai_response += chunk
-                        
-                        # Parse and execute commands automatically
-                        try:
-                            from command_executor import get_command_executor
-                            from ai_response_parser import get_ai_response_parser
-                            from auto_retry_manager import get_auto_retry_manager
-                            
-                            command_executor = get_command_executor(workspace)
-                            response_parser = get_ai_response_parser()
-                            retry_manager = get_auto_retry_manager()
-                            
-                            # Parse AI response
-                            parsed = response_parser.parse_ai_response(ai_response)
-                            
-                            # Execute commands if found
-                            if parsed['commands']:
-                                logger.info(f"Found {len(parsed['commands'])} commands, executing...")
-                                execution_results = []
-                                
-                                for i, command in enumerate(parsed['commands'], 1):
-                                    logger.info(f"Executing command {i}/{len(parsed['commands'])}: {command}")
-                                    
-                                    # Execute with retry
-                                    max_retries = 3
-                                    for attempt in range(max_retries):
-                                        result = command_executor.execute_command(
-                                            command,
-                                            cwd=workspace,
-                                            timeout=300,
-                                            verify=True
-                                        )
-                                        execution_results.append(result)
-                                        
-                                        if result.get('verified', False) and result.get('success', False):
-                                            logger.info(f"Command {i} executed successfully")
-                                            break
-                                        elif attempt < max_retries - 1:
-                                            error_msg = result.get('error', '') or result.get('stderr', '') or 'Verification failed'
-                                            alt_command = retry_manager.retry_with_alternative(command, error_msg, attempt + 1)
-                                            if alt_command and alt_command != command:
-                                                logger.info(f"Trying alternative: {alt_command}")
-                                                command = alt_command
-                                            await asyncio.sleep(1)
-                                
-                                # Format results and append to response
-                                if execution_results:
-                                    results_summary = "\n\n**Execution Results:**\n"
-                                    for r in execution_results:
-                                        results_summary += f"`{r['command']}` → Exit: {r.get('exit_code', 'N/A')}, Verified: {'Yes' if r.get('verified', False) else 'No'}\n"
-                                        if r.get('stdout'):
-                                            results_summary += f"Output: {r['stdout'][:200]}...\n"
-                                    ai_response += results_summary
-                        except Exception as cmd_err:
-                            logger.warning(f"Command execution failed: {cmd_err}", exc_info=True)
-                            # Continue with original response if command execution fails
-                        
-                        cleaned_response = ai_response
-                    except Exception as fallback_err:
-                        logger.error(f"Fallback execution failed: {fallback_err}", exc_info=True)
-                        # Last resort: just use brain directly
-                        cleaned_response = ""
-                        for chunk in brain.chat(user_message):
-                            cleaned_response += chunk
-                
-                # Update task results if available
-                if hasattr(desktop_handler, 'last_task_results'):
-                    context.user_data['last_task_results'] = desktop_handler.last_task_results
+                else:
+                    # Fallback without concurrency management
+                    cleaned_response = await desktop_handler.handle_with_streaming(
+                        user_message,
+                        update,
+                        context
+                    )
                 
                 # Store AI response in secure memory (with vector embeddings if available)
                 # Use timeout to prevent hanging on slow memory operations
@@ -6955,27 +3938,6 @@ Otherwise, list what still needs to be done."""
                     pass
                 logger.info(f"Cleanup complete for user {user_id}")
             
-            # SAVE STATE: Save current task state before sending results
-            try:
-                from user_state_manager import get_user_state_manager
-                from datetime import datetime
-                state_mgr = get_user_state_manager(db)
-                
-                # Save last task description
-                if 'last_task_description' in context.user_data:
-                    state_mgr.save_state(
-                        user_id,
-                        'last_task',
-                        {
-                            'description': context.user_data.get('last_task_description'),
-                            'response': cleaned_response[:500] if cleaned_response else '',
-                            'timestamp': datetime.now().isoformat()
-                        },
-                        workspace
-                    )
-            except Exception as e:
-                logger.warning(f"Could not save task state: {e}")
-            
             # Send screenshots if any
             screenshots = context.user_data.get('screenshots', [])
             if screenshots:
@@ -7008,167 +3970,31 @@ Otherwise, list what still needs to be done."""
                 except Exception as e:
                     logger.error(f"Error sending screenshots: {e}")
             
-            # Send generated files if any (with rate limit checking)
+            # Send generated files if any
             generated_files = context.user_data.get('generated_files', [])
-            files_sent_count = 0
-            files_failed_count = 0
-            
             if generated_files:
-                logger.info(f"[FILE-SEND] Starting to send {len(generated_files)} generated files to Telegram...")
-                
-                # Check rate limits before sending files
-                try:
-                    from telegram_rate_limit_manager import get_rate_limit_manager
-                    rate_limit_mgr = get_rate_limit_manager()
-                    chat_id = update.effective_chat.id if update.effective_chat else None
-                    
-                    if chat_id and rate_limit_mgr.is_paused(chat_id):
-                        pause_remaining = rate_limit_mgr.get_pause_remaining(chat_id)
-                        logger.warning(f"[RATE-LIMIT] File sending paused for chat {chat_id}, waiting {pause_remaining:.1f}s...")
-                        if pause_remaining and pause_remaining > 0:
-                            await asyncio.sleep(min(pause_remaining, 120))  # Wait up to 2 minutes
-                            rate_limit_mgr.resume_chat(chat_id)  # Resume after waiting
-                except Exception as e:
-                    logger.warning(f"[RATE-LIMIT] Error checking rate limits before file send: {e}")
                 try:
                     from file_generator import is_file_size_valid, MAX_FILE_SIZE
                     from pathlib import Path
-                    from task_summary_generator import get_task_summary_generator
-                    import time
                     
-                    # Get task information for summary
-                    task_description = context.user_data.get('last_task_description', user_message)
-                    task_results = context.user_data.get('last_task_results', {})
-                    task_start_time = context.user_data.get('task_start_time', time.time())
-                    task_duration = time.time() - task_start_time
-                    
-                    # Generate summary
-                    summary_generator = get_task_summary_generator()
-                    
-                    # Prepare file information
-                    file_info_list = []
                     for file_path in generated_files:
                         if not file_path or not Path(file_path).exists():
                             continue
-                        
-                        file_info = summary_generator.generate_file_usage_guide(file_path)
-                        file_info_list.append(file_info)
-                    
-                    # Generate and send summary
-                    if file_info_list:
-                        summary_text = summary_generator.generate_summary(
-                            task_description=task_description,
-                            results=task_results,
-                            files=file_info_list,
-                            duration=task_duration,
-                            status='complete'
-                        )
-                        
-                        # Send summary as document
-                        try:
-                            from document_generator import get_document_generator
-                            doc_gen = get_document_generator()
-                            summary_file = doc_gen.generate_pdf(
-                                summary_text,
-                                filename=f"task_summary_{int(time.time())}.pdf",
-                                title="Task Completion Summary"
-                            )
-                            
-                            if summary_file and Path(summary_file).exists():
-                                with open(summary_file, 'rb') as f:
-                                    file_keyboard = ensure_mode_keyboard_at_bottom(user_id, context)
-                                    await update.message.reply_document(
-                                        document=f,
-                                        filename=Path(summary_file).name,
-                                        caption="📋 *Task Completion Summary*\n\nIncludes usage instructions and results overview",
-                                        parse_mode='Markdown',
-                                        reply_markup=file_keyboard
-                                    )
-                        except Exception as e:
-                            logger.warning(f"Could not generate summary PDF, sending as text: {e}")
-                            # Send summary as text message
-                            summary_preview = summary_text[:3000] + ("..." if len(summary_text) > 3000 else "")
-                            file_keyboard = ensure_mode_keyboard_at_bottom(user_id, context)
-                            await update.message.reply_text(
-                                f"📋 *Task Completion Summary*\n\n{summary_preview}",
-                                parse_mode='Markdown',
-                                reply_markup=file_keyboard
-                            )
-                    
-                    # Send files with descriptions
-                    for file_path in generated_files:
-                        if not file_path or not Path(file_path).exists():
-                            continue
-                        
-                        # Find file info
-                        file_info = next((f for f in file_info_list if f['name'] == Path(file_path).name), None)
                         
                         # Check file size
                         if is_file_size_valid(file_path):
                             try:
-                                # Check rate limit before sending each file
-                                chat_id = update.effective_chat.id if update.effective_chat else None
-                                try:
-                                    from telegram_rate_limit_manager import get_rate_limit_manager
-                                    rate_limit_mgr = get_rate_limit_manager()
-                                    if chat_id and rate_limit_mgr.is_paused(chat_id):
-                                        pause_remaining = rate_limit_mgr.get_pause_remaining(chat_id)
-                                        logger.warning(f"[RATE-LIMIT] Paused before sending file {Path(file_path).name}, waiting {pause_remaining:.1f}s...")
-                                        if pause_remaining and pause_remaining > 0:
-                                            await asyncio.sleep(min(pause_remaining, 60))
-                                            rate_limit_mgr.resume_chat(chat_id)
-                                except Exception:
-                                    pass
-                                
                                 with open(file_path, 'rb') as f:
                                     # Add mode keyboard to file sending
                                     file_keyboard = ensure_mode_keyboard_at_bottom(user_id, context)
-                                    
-                                    # Create caption with usage info
-                                    caption = None
-                                    if file_info:
-                                        caption = f"📄 *{file_info['desc']}*\n\n*Usage:*\n```\n{file_info['usage']}\n```"
-                                    
                                     await update.message.reply_document(
                                         document=f,
                                         filename=Path(file_path).name,
-                                        caption=caption,
-                                        parse_mode='Markdown',
                                         reply_markup=file_keyboard
                                     )
-                                files_sent_count += 1
-                                logger.info(f"[FILE-SEND] Successfully sent file {files_sent_count}/{len(generated_files)}: {file_path}")
-                                
-                                # Record successful send to reset rate limit counter
-                                try:
-                                    from telegram_rate_limit_manager import get_rate_limit_manager
-                                    rate_limit_mgr = get_rate_limit_manager()
-                                    if chat_id:
-                                        rate_limit_mgr.record_successful_send(chat_id)
-                                except Exception:
-                                    pass
-                                
-                                # Small delay between files to avoid rate limits
-                                await asyncio.sleep(1)
+                                logger.info(f"Sent file: {file_path}")
                             except Exception as e:
-                                files_failed_count += 1
-                                logger.error(f"[FILE-SEND] Failed to send file {file_path}: {e}")
-                                
-                                # Check if it's a rate limit error
-                                if '429' in str(e) or 'Too Many Requests' in str(e) or 'rate limit' in str(e).lower():
-                                    logger.warning(f"[RATE-LIMIT] Rate limit hit while sending file, pausing...")
-                                    try:
-                                        from telegram_rate_limit_manager import get_rate_limit_manager
-                                        rate_limit_mgr = get_rate_limit_manager()
-                                        if chat_id:
-                                            rate_limit_mgr.record_rate_limit(chat_id)
-                                            # Wait before continuing
-                                            pause_remaining = rate_limit_mgr.get_pause_remaining(chat_id) or 60
-                                            logger.info(f"[RATE-LIMIT] Waiting {pause_remaining}s before resuming file sends...")
-                                            await asyncio.sleep(min(pause_remaining, 120))
-                                    except Exception as rate_err:
-                                        logger.warning(f"[RATE-LIMIT] Error handling rate limit: {rate_err}")
-                                        await asyncio.sleep(60)  # Default wait
+                                logger.error(f"Failed to send file {file_path}: {e}")
                         else:
                             file_size = Path(file_path).stat().st_size
                             file_keyboard = ensure_mode_keyboard_at_bottom(user_id, context)
@@ -7179,59 +4005,7 @@ Otherwise, list what still needs to be done."""
                                 reply_markup=file_keyboard
                             )
                 except Exception as e:
-                    logger.error(f"[FILE-SEND] Error sending files: {e}")
-                
-                # Final verification: Check if all files were sent
-                logger.info(f"[FILE-SEND] File sending complete - Sent: {files_sent_count}/{len(generated_files)}, Failed: {files_failed_count}")
-                
-                if files_failed_count > 0:
-                    logger.warning(f"[FILE-SEND] {files_failed_count} files failed to send - may need retry")
-                
-                # Mark files as sent in context for completion verification
-                context.user_data['files_sent'] = files_sent_count
-                context.user_data['files_failed'] = files_failed_count
-                context.user_data['all_files_sent'] = (files_sent_count == len(generated_files))
-                
-                # Final completion check: Verify all files sent before marking complete
-                if files_sent_count < len(generated_files):
-                    logger.warning(f"[COMPLETE-CHECK] Not all files sent ({files_sent_count}/{len(generated_files)}) - task may not be fully complete")
-                else:
-                    logger.info(f"[COMPLETE-CHECK] All {files_sent_count} files successfully sent to Telegram - task complete")
-                
-                # Final AI prompt to verify everything is done and all files sent
-                if files_sent_count == len(generated_files) and len(generated_files) > 0:
-                    logger.info(f"[COMPLETE-CHECK] All files sent, requesting final AI confirmation...")
-                    try:
-                        final_completion_prompt = f"""Final completion verification:
-
-✅ Commands executed: {len(execution_results)}
-✅ Files generated: {len(generated_files)}
-✅ Files sent to Telegram: {files_sent_count}/{len(generated_files)}
-
-Verify that:
-1. All commands executed successfully
-2. All files generated
-3. All files sent to Telegram
-4. Task objectives met
-5. User has received all results
-
-If EVERYTHING is complete and user has received all files, say "Task complete - all files sent to user".
-Otherwise, list what still needs to be done."""
-                        
-                        verification_response = ""
-                        for chunk in brain.chat(final_completion_prompt):
-                            verification_response += chunk
-                        
-                        verification_parsed = response_parser.parse_ai_response(verification_response)
-                        
-                        if verification_parsed.get('is_complete') or 'all files sent' in verification_response.lower():
-                            logger.info(f"[COMPLETE-CHECK] AI confirmed: Task complete - all files sent to user")
-                            context.user_data['task_fully_complete'] = True
-                        else:
-                            logger.warning(f"[COMPLETE-CHECK] AI indicates more work needed: {verification_response[:200]}...")
-                            context.user_data['task_fully_complete'] = False
-                    except Exception as e:
-                        logger.warning(f"[COMPLETE-CHECK] Error in final completion verification: {e}")
+                    logger.error(f"Error sending files: {e}")
                 
                 # Clean up files after sending
                 try:
@@ -7256,8 +4030,6 @@ Otherwise, list what still needs to be done."""
         except ImportError as e:
             logger.warning(f"Desktop AI handler not available: {e}, using basic streaming")
             # Fallback to basic streaming
-            # Ensure time module is accessible (re-import to avoid shadowing issues)
-            import time as time_module
             typing_task = asyncio.create_task(
                 send_typing_continuously(context, update.effective_chat.id)
             )
@@ -7275,7 +4047,7 @@ Otherwise, list what still needs to be done."""
                     full_response += chunk
                     chunk_buffer += chunk
                     
-                    current_time = time_module.time()
+                    current_time = time.time()
                     should_update = (
                         current_time - last_update_time >= update_interval or
                         len(chunk_buffer) >= buffer_size
@@ -7295,31 +4067,14 @@ Otherwise, list what still needs to be done."""
                                     sent_message = await update.message.reply_text(display_text)
                             else:
                                 display_text = cleaned_chunk[:4000] if len(cleaned_chunk) > 4000 else cleaned_chunk
-                                # For streaming, send new messages instead of editing to avoid 400 errors
-                                # Only send new message if content has changed significantly (at least 100 chars difference)
-                                if sent_message:
-                                    try:
-                                        # Get last sent text length
-                                        last_text_length = len(_message_edit_cache.get(f"{update.effective_chat.id}_{sent_message.message_id}", ""))
-                                        current_text_length = len(display_text)
-                                        
-                                        # Only send new message if content changed significantly (100+ chars) or 5+ seconds passed
-                                        if (current_text_length - last_text_length > 100) or (time_since_last >= 5.0):
-                                            try:
-                                                sent_message = await update.message.reply_text(display_text, parse_mode='Markdown')
-                                                # Cache the message ID and text
-                                                if sent_message:
-                                                    msg_id = f"{update.effective_chat.id}_{sent_message.message_id}"
-                                                    _message_edit_cache[msg_id] = display_text
-                                            except BadRequest:
-                                                sent_message = await update.message.reply_text(display_text)
-                                    except Exception as e:
-                                        logger.debug(f"Error sending streaming update: {e}")
-                                        # Fallback: try to edit (but it will likely fail, that's okay)
-                                        try:
-                                            await sent_message.edit_text(display_text, parse_mode='Markdown')
-                                        except:
-                                            pass
+                                try:
+                                    await sent_message.edit_text(display_text, parse_mode='Markdown')
+                                except BadRequest as e:
+                                    if 'not modified' not in str(e).lower():
+                                        if 'too long' in str(e).lower() and len(cleaned_chunk) > 4000:
+                                            remaining = cleaned_chunk[4000:]
+                                            if remaining:
+                                                sent_message = await update.message.reply_text(remaining[:4000], parse_mode='Markdown')
                             
                             last_update_time = current_time
                             chunk_buffer = ""
@@ -7330,89 +4085,6 @@ Otherwise, list what still needs to be done."""
                 cleaned_response = full_response.replace("[SMG-Forcer]:", "").replace("[HacxGPT]:", "").strip()
                 if not cleaned_response:
                     cleaned_response = "No response generated."
-                
-                # Parse and execute commands automatically (Cursor-style)
-                try:
-                    from command_executor import get_command_executor
-                    from ai_response_parser import get_ai_response_parser
-                    from auto_retry_manager import get_auto_retry_manager
-                    
-                    # Get workspace
-                    try:
-                        from user_workspace_manager import UserWorkspaceManager
-                        workspace_manager = UserWorkspaceManager.get_instance()
-                        user_workspace = workspace_manager.get_user_workspace(user_id)
-                        workspace = str(user_workspace)
-                    except ImportError:
-                        base_workspace = get_workspace_root()
-                        workspace = os.path.join(base_workspace, f"user_{user_id}")
-                        os.makedirs(workspace, exist_ok=True)
-                    
-                    command_executor = get_command_executor(workspace)
-                    response_parser = get_ai_response_parser()
-                    retry_manager = get_auto_retry_manager()
-                    
-                    # Parse AI response for commands
-                    parsed = response_parser.parse_ai_response(cleaned_response)
-                    
-                    # Execute commands if found
-                    if parsed['commands']:
-                        logger.info(f"Found {len(parsed['commands'])} commands in response, executing...")
-                        execution_results = []
-                        
-                        for i, command in enumerate(parsed['commands'], 1):
-                            logger.info(f"Executing command {i}/{len(parsed['commands'])}: {command}")
-                            
-                            # Execute with retry
-                            max_retries = 3
-                            executed = False
-                            
-                            for attempt in range(max_retries):
-                                result = command_executor.execute_command(
-                                    command,
-                                    cwd=workspace,
-                                    timeout=300,
-                                    verify=True
-                                )
-                                execution_results.append(result)
-                                
-                                if result.get('verified', False) and result.get('success', False):
-                                    executed = True
-                                    logger.info(f"Command {i} executed and verified")
-                                    break
-                                elif attempt < max_retries - 1:
-                                    error_msg = result.get('error', '') or result.get('stderr', '') or 'Verification failed'
-                                    alt_command = retry_manager.retry_with_alternative(command, error_msg, attempt + 1)
-                                    if alt_command and alt_command != command:
-                                        logger.info(f"Trying alternative: {alt_command}")
-                                        command = alt_command
-                                    await asyncio.sleep(1)
-                            
-                            if not executed:
-                                logger.warning(f"Command {i} failed after {max_retries} attempts")
-                        
-                        # Append execution results to response
-                        if execution_results:
-                            results_summary = "\n\n**Execution Results:**\n"
-                            for r in execution_results:
-                                status = "✅" if r.get('verified', False) and r.get('success', False) else "❌"
-                                results_summary += f"{status} `{r['command'][:60]}...`\n"
-                                if r.get('stdout'):
-                                    results_summary += f"   Output: {r['stdout'][:150]}...\n"
-                                elif r.get('stderr'):
-                                    results_summary += f"   Error: {r['stderr'][:150]}...\n"
-                            cleaned_response += results_summary
-                            
-                            # Update sent message with results
-                            if sent_message:
-                                try:
-                                    final_text = cleaned_response[:4000] if len(cleaned_response) > 4000 else cleaned_response
-                                    await sent_message.edit_text(final_text, parse_mode='Markdown')
-                                except BadRequest:
-                                    pass
-                except Exception as cmd_err:
-                    logger.warning(f"Command execution failed: {cmd_err}", exc_info=True)
-                    # Continue with original response if command execution fails
                 
                 if sent_message:
                     try:
@@ -7893,36 +4565,6 @@ def main():
         cleanup_service.start()
         logger.info("Memory cleanup service started (3-day retention)")
     
-    # Start job worker for background job processing with streaming
-    try:
-        from job_worker import get_job_worker
-        from database_hybrid import Database
-        job_worker = get_job_worker(Database(), application)
-        
-        async def start_job_worker():
-            await job_worker.start()
-            logger.info("Job worker started - background streaming enabled")
-        
-        # Start worker when application starts
-        async def start_workers_on_init(app: Application) -> None:
-            await asyncio.sleep(1)  # Wait for app to fully initialize
-            asyncio.create_task(start_job_worker())
-        
-        # Integrate with existing post_init if it exists
-        original_post_init = getattr(application, 'post_init', None)
-        if original_post_init:
-            async def combined_post_init(app: Application) -> None:
-                await original_post_init(app)
-                await start_workers_on_init(app)
-            application.post_init = combined_post_init
-        else:
-            application.post_init = start_workers_on_init
-        
-        logger.info("Job worker will start on application initialization")
-    except Exception as e:
-        logger.warning(f"Could not initialize job worker: {e}")
-        logger.warning("Bot will continue without background job processing")
-    
     # Start project cleanup service (3-day retention)
     try:
         from project_manager import ProjectManager
@@ -8077,55 +4719,6 @@ def main():
     application.add_handler(CommandHandler("admin_users", admin_users))
     application.add_handler(CommandHandler("admin_add", admin_add))
     application.add_handler(CommandHandler("admin_upgrade", admin_upgrade))
-    
-    # Document generation commands
-    application.add_handler(CommandHandler("generate_document", generate_document_command))
-    application.add_handler(CommandHandler("generate_pdf", generate_pdf_command))
-    application.add_handler(CommandHandler("generate_word", generate_word_command))
-    application.add_handler(CommandHandler("generate_excel", generate_excel_command))
-    
-    # Barcode and QR code commands
-    application.add_handler(CommandHandler("generate_qr", generate_qr_command))
-    application.add_handler(CommandHandler("generate_barcode", generate_barcode_command))
-    
-    # Template management commands
-    application.add_handler(CommandHandler("save_template", save_template_command))
-    application.add_handler(CommandHandler("use_template", use_template_command))
-    application.add_handler(CommandHandler("list_templates", list_templates_command))
-    application.add_handler(CommandHandler("delete_template", delete_template_command))
-    application.add_handler(CommandHandler("download_template", download_template_command))
-    
-    # Image generation commands
-    application.add_handler(CommandHandler("generate_image", generate_image_command))
-    
-    # Image editing commands
-    application.add_handler(CommandHandler("edit_image", edit_image_command))
-    
-    # Face swap commands
-    application.add_handler(CommandHandler("face_swap", face_swap_command))
-    
-    # Service management commands
-    application.add_handler(CommandHandler("start_service", start_service_command))
-    application.add_handler(CommandHandler("stop_service", stop_service_command))
-    application.add_handler(CommandHandler("list_services", list_services_command))
-    application.add_handler(CommandHandler("service_status", service_status_command))
-    application.add_handler(CommandHandler("service_logs", service_logs_command))
-    
-    # Project management commands
-    application.add_handler(CommandHandler("save_project", save_project_command))
-    application.add_handler(CommandHandler("restore_project", restore_project_command))
-    application.add_handler(CommandHandler("list_projects", list_projects_command))
-    application.add_handler(CommandHandler("delete_project", delete_project_command))
-    
-    # Admin workspace/service management commands
-    application.add_handler(CommandHandler("admin_workspaces", admin_workspaces_command))
-    application.add_handler(CommandHandler("admin_workspace", admin_workspace_command))
-    application.add_handler(CommandHandler("admin_services", admin_services_command))
-    application.add_handler(CommandHandler("admin_service", admin_service_command))
-    application.add_handler(CommandHandler("admin_delete_project", admin_delete_project_command))
-    application.add_handler(CommandHandler("admin_stop_service", admin_stop_service_command))
-    application.add_handler(CommandHandler("admin_delete_service", admin_delete_service_command))
-    application.add_handler(CommandHandler("admin_workspace_stats", admin_workspace_stats_command))
     
     # Add approval callback handler
     application.add_handler(CallbackQueryHandler(handle_approval_callback, pattern=r'^(approve|reject):'))
