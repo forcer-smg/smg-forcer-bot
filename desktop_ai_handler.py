@@ -3338,6 +3338,12 @@ If you see errors, fix them. If dependencies are missing, install them. Then con
                         )
                         break
                     
+                    # Also break if we have empty response AND no commands were executed in this iteration
+                    # This prevents infinite loops where the AI keeps generating empty responses
+                    if response_len < 50 and step_counter == 0:
+                        logger.error(f"Breaking loop: Empty response and no commands executed (iteration {iteration})")
+                        break
+                    
                     # Check for errors that need fixing
                     errors_in_results = [r for r in execution_results if '❌ ERROR' in r or '⏱️ TIMEOUT' in r or 'ERROR:' in r or 'exit code' in r.lower() or 'ModuleNotFoundError' in r or 'Traceback' in r]
                     
@@ -3452,6 +3458,20 @@ Remaining steps: {remaining_steps_text}
                 step_counter = 0
                 for cmd in new_commands:
                     if cmd.strip():
+                        # Check for duplicate commands to prevent infinite loops
+                        cmd_hash = hashlib.md5(cmd.strip().encode()).hexdigest()
+                        if cmd_hash in recent_command_hashes:
+                            logger.warning(f"Skipping duplicate command (already executed recently): {cmd[:100]}")
+                            continue
+                        
+                        # Add to history (keep last 20 commands)
+                        executed_commands_history.append(cmd.strip())
+                        recent_command_hashes.add(cmd_hash)
+                        if len(executed_commands_history) > 20:
+                            old_cmd = executed_commands_history.pop(0)
+                            old_hash = hashlib.md5(old_cmd.encode()).hexdigest()
+                            recent_command_hashes.discard(old_hash)
+                        
                         step_counter += 1
                         output, exit_code = self.execute_terminal_command(cmd.strip())
                         
