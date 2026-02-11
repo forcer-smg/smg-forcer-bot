@@ -87,7 +87,10 @@ class OxaPay:
             
             if data.get('result') == 100:
                 # Try multiple possible field names for invoice ID
+                # OxaPay API returns 'trackId' as the invoice identifier
                 invoice_id = (
+                    data.get('trackId') or  # Primary field name used by OxaPay
+                    data.get('track_id') or
                     data.get('invoiceId') or 
                     data.get('invoice_id') or 
                     data.get('invoiceID') or
