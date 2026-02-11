@@ -80,19 +80,60 @@ class OxaPay:
             response.raise_for_status()
             data = response.json()
             
+            # Log full response for debugging
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"OxaPay API Response: {data}")
+            
             if data.get('result') == 100:
+                # Try multiple possible field names for invoice ID
+                invoice_id = (
+                    data.get('invoiceId') or 
+                    data.get('invoice_id') or 
+                    data.get('invoiceID') or
+                    data.get('id') or
+                    data.get('invoice')
+                )
+                
+                pay_link = data.get('payLink') or data.get('pay_link') or data.get('url')
+                
+                # If invoice_id is not in response, extract it from payLink URL
+                # URL format: https://pay.oxapay.com/{merchant_id}/{invoice_id}
+                if not invoice_id and pay_link:
+                    try:
+                        import re
+                        # Extract invoice ID from URL (last number after last slash)
+                        match = re.search(r'/(\d+)/?$', pay_link.rstrip('/'))
+                        if match:
+                            invoice_id = match.group(1)
+                            logger.info(f"Extracted invoice_id from URL: {invoice_id}")
+                    except Exception as e:
+                        logger.warning(f"Could not extract invoice_id from URL: {e}")
+                
+                if not invoice_id:
+                    logger.error(f"Invoice ID not found in response or URL. Response: {data}")
+                    return {
+                        'success': False,
+                        'error': 'Invoice ID not found in API response'
+                    }
+                
                 return {
                     'success': True,
-                    'invoice_id': data.get('invoiceId'),
-                    'invoice_url': data.get('payLink'),
+                    'invoice_id': invoice_id,
+                    'invoice_url': pay_link,
                     'order_id': payload['orderId']
                 }
             else:
+                error_msg = data.get('errMsg', f"API returned result code: {data.get('result')}")
+                logger.error(f"OxaPay API error: {error_msg}, Full response: {data}")
                 return {
                     'success': False,
-                    'error': data.get('errMsg', 'Unknown error')
+                    'error': error_msg
                 }
         except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"OxaPay API exception: {e}", exc_info=True)
             return {
                 'success': False,
                 'error': str(e)

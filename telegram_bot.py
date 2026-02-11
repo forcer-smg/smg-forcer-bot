@@ -663,12 +663,32 @@ async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    # Ensure invoice_id exists
+    invoice_id = payment_result.get('invoice_id')
+    invoice_url = payment_result.get('invoice_url')
+    
+    if not invoice_id:
+        logger.error(f"Payment created but invoice_id is missing. Response: {payment_result}")
+        await update.message.reply_text(
+            "❌ *Payment Error:* Payment created but invoice ID is missing. Please contact support.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    if not invoice_url:
+        logger.error(f"Payment created but invoice_url is missing. Response: {payment_result}")
+        await update.message.reply_text(
+            "❌ *Payment Error:* Payment created but payment URL is missing. Please contact support.",
+            parse_mode='Markdown'
+        )
+        return
+    
     # Save payment to database
     db.create_payment(
         user_id=user_id,
         plan_type=plan_type,
         amount=plan['price'],
-        oxapay_invoice_id=payment_result['invoice_id']
+        oxapay_invoice_id=invoice_id
     )
     
     payment_text = f"""
@@ -685,16 +705,16 @@ async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ┌─ PAYMENT INFO ────────────────────────┐
 │ Payment ID:                           │
-│ `{payment_result['invoice_id']}`      │
+│ `{invoice_id}`                        │
 └──────────────────────────────────────┘
 
 💳 Click below to complete payment
     """
     
     keyboard = [
-        [InlineKeyboardButton("💳 Pay with Crypto", url=payment_result['invoice_url'])],
+        [InlineKeyboardButton("💳 Pay with Crypto", url=invoice_url)],
         [
-            InlineKeyboardButton("🔄 Check Payment", callback_data=f"check_payment_{payment_result['invoice_id']}"),
+            InlineKeyboardButton("🔄 Check Payment", callback_data=f"check_payment_{invoice_id}"),
             InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")
         ]
     ]
@@ -1573,11 +1593,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(f"❌ Error: {payment_result.get('error')}", show_alert=True)
             return
         
+        # Ensure invoice_id exists
+        invoice_id = payment_result.get('invoice_id')
+        invoice_url = payment_result.get('invoice_url')
+        
+        if not invoice_id:
+            logger.error(f"Payment created but invoice_id is missing. Response: {payment_result}")
+            await query.answer("❌ Error: Payment created but invoice ID is missing. Please contact support.", show_alert=True)
+            return
+        
+        if not invoice_url:
+            logger.error(f"Payment created but invoice_url is missing. Response: {payment_result}")
+            await query.answer("❌ Error: Payment created but payment URL is missing. Please contact support.", show_alert=True)
+            return
+        
+        # Create payment record in database
         db.create_payment(
             user_id=user_id,
             plan_type=plan_type,
             amount=plan['price'],
-            oxapay_invoice_id=payment_result['invoice_id']
+            oxapay_invoice_id=invoice_id
         )
         
         payment_text = f"""
@@ -1594,16 +1629,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ┌─ PAYMENT INFO ────────────────────────┐
 │ Payment ID:                           │
-│ `{payment_result['invoice_id']}`      │
+│ `{invoice_id}`                        │
 └──────────────────────────────────────┘
 
 💳 Click below to complete payment
         """
         
         keyboard = [
-            [InlineKeyboardButton("💳 Pay with Crypto", url=payment_result['invoice_url'])],
+            [InlineKeyboardButton("💳 Pay with Crypto", url=invoice_url)],
             [
-                InlineKeyboardButton("🔄 Check Payment", callback_data=f"check_payment_{payment_result['invoice_id']}"),
+                InlineKeyboardButton("🔄 Check Payment", callback_data=f"check_payment_{invoice_id}"),
                 InlineKeyboardButton("🏠 Main Menu", callback_data="menu_home")
             ]
         ]
