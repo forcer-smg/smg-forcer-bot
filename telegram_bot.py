@@ -840,7 +840,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             try:
                                 from desktop_ai_handler import DesktopAIHandler
                                 from brain import get_brain
-                                import os
                                 
                                 # Get workspace root
                                 workspace = os.getenv('WORKSPACE_ROOT', os.getcwd())
